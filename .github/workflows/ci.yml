@@ -12,7 +12,7 @@ jobs:
         with:
           python-version: "3.11"
           cache: pip
-      - run: python -m pip install --upgrade pip
+      - run: python -m pip install --upgrade pip setuptools wheel
       - run: pip install -e ".[dev,openai-agents,claude-agent]"
       - run: ruff check .
       - run: ruff format --check .
