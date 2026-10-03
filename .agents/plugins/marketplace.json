@@ -1,0 +1,20 @@
+{
+  "name": "aegis",
+  "interface": {
+    "displayName": "Aegis"
+  },
+  "plugins": [
+    {
+      "name": "aegis",
+      "source": {
+        "source": "local",
+        "path": "./plugins/aegis"
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_INSTALL"
+      },
+      "category": "Security"
+    }
+  ]
+}

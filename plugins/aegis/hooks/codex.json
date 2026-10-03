@@ -5,8 +5,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python3",
-            "args": ["${CLAUDE_PLUGIN_ROOT}/scripts/aegis.py", "hook", "SessionStart"],
+            "command": "python3 \"$PLUGIN_ROOT/scripts/aegis.py\" hook codex SessionStart",
             "timeout": 10
           }
         ]
@@ -17,9 +16,9 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python3",
-            "args": ["${CLAUDE_PLUGIN_ROOT}/scripts/aegis.py", "hook", "UserPromptSubmit"],
-            "timeout": 15
+            "command": "python3 \"$PLUGIN_ROOT/scripts/aegis.py\" hook codex UserPromptSubmit",
+            "timeout": 15,
+            "statusMessage": "Aegis governance check"
           }
         ]
       }
@@ -30,9 +29,9 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python3",
-            "args": ["${CLAUDE_PLUGIN_ROOT}/scripts/aegis.py", "hook", "PreToolUse"],
-            "timeout": 15
+            "command": "python3 \"$PLUGIN_ROOT/scripts/aegis.py\" hook codex PreToolUse",
+            "timeout": 15,
+            "statusMessage": "Aegis governance check"
           }
         ]
       }
@@ -43,9 +42,9 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python3",
-            "args": ["${CLAUDE_PLUGIN_ROOT}/scripts/aegis.py", "hook", "PostToolUse"],
-            "timeout": 15
+            "command": "python3 \"$PLUGIN_ROOT/scripts/aegis.py\" hook codex PostToolUse",
+            "timeout": 15,
+            "statusMessage": "Aegis governance check"
           }
         ]
       }
@@ -55,8 +54,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python3",
-            "args": ["${CLAUDE_PLUGIN_ROOT}/scripts/aegis.py", "hook", "SessionEnd"],
+            "command": "python3 \"$PLUGIN_ROOT/scripts/aegis.py\" hook codex SessionEnd",
             "timeout": 3
           }
         ]
