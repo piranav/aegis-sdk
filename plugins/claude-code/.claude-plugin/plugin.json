@@ -1,0 +1,9 @@
+{
+  "name": "aegis",
+  "displayName": "Aegis",
+  "version": "0.1.0",
+  "description": "Connects Claude Code to your organization's Aegis governance: IT-assigned rules for tool calls and prompts, with liveness reporting.",
+  "author": { "name": "Aegis" },
+  "repository": "https://github.com/piranav/aegis-sdk",
+  "keywords": ["governance", "security", "compliance"]
+}

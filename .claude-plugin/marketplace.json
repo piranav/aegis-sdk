@@ -1,0 +1,12 @@
+{
+  "name": "aegis",
+  "owner": { "name": "Aegis" },
+  "description": "Aegis governance plugins for coding assistants.",
+  "plugins": [
+    {
+      "name": "aegis",
+      "source": "./plugins/claude-code",
+      "description": "Connect Claude Code to your organization's Aegis governance."
+    }
+  ]
+}
