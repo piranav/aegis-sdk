@@ -8,6 +8,7 @@ format. The engine, connection, and API handling are shared.
 from __future__ import annotations
 
 import json
+import os
 import re
 from base64 import urlsafe_b64decode
 from dataclasses import dataclass, field
@@ -140,7 +141,8 @@ class ClaudeCode(Adapter):
 
     def account(self) -> dict:
         try:
-            config = json.loads((Path.home() / ".claude.json").read_text())
+            home = os.environ.get("CLAUDE_CONFIG_DIR") or Path.home()
+            config = json.loads((Path(home) / ".claude.json").read_text())
             account = config.get("oauthAccount") or {}
         except (OSError, ValueError, AttributeError):
             return {}
@@ -180,7 +182,8 @@ class Codex(Adapter):
     def account(self) -> dict:
         """Email and ChatGPT plan from the ID token; no token ever leaves the machine."""
         try:
-            auth = json.loads((Path.home() / ".codex" / "auth.json").read_text())
+            home = os.environ.get("CODEX_HOME") or Path.home() / ".codex"
+            auth = json.loads((Path(home) / "auth.json").read_text())
             token = (auth.get("tokens") or {}).get("id_token") or ""
             payload = token.split(".")[1]
             claims = json.loads(urlsafe_b64decode(payload + "=" * (-len(payload) % 4)))

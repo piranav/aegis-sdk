@@ -161,6 +161,12 @@ def test_codex_account_comes_from_the_id_token_claims(tmp_path, monkeypatch):
         json.dumps({"tokens": {"id_token": f"h.{payload}.sig"}})
     )
     monkeypatch.setattr(adapters.Path, "home", staticmethod(lambda: tmp_path))
+    monkeypatch.delenv("CODEX_HOME", raising=False)
+    expected = {"account_email": "dev@corp", "account_organization": "ChatGPT team"}
+    assert ADAPTERS["codex"].account() == expected
+    (tmp_path / "custom").mkdir()
+    (tmp_path / ".codex" / "auth.json").rename(tmp_path / "custom" / "auth.json")
+    monkeypatch.setenv("CODEX_HOME", str(tmp_path / "custom"))
     assert ADAPTERS["codex"].account() == {
         "account_email": "dev@corp",
         "account_organization": "ChatGPT team",
