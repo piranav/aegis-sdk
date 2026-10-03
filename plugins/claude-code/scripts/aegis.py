@@ -395,6 +395,12 @@ def hook(event: str) -> int:
             return _unavailable(creds, event, exc)
         if result.get("decision") == "allow":
             return 0
+        violations = result.get("violations") or []
+        if violations and all("classification unavailable" in v.lower() for v in violations):
+            # Aegis couldn't classify the result: an outage, not a rule match. The tool
+            # already ran, so follow IT's offline choice instead of flagging every call.
+            if creds.get("failure_mode") != "closed":
+                return 0
         return emit({"decision": "block", "reason": _reason(result)})
 
     return 0
