@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "aegis-sdk"
-version = "0.1.0"
+version = "0.2.0"
 description = "Python client and agent-framework integrations for the Aegis governance gateway"
 readme = "README.md"
 requires-python = ">=3.11"

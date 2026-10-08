@@ -5,8 +5,9 @@ import os
 
 from agents import Agent, Runner, function_tool
 
-from aegis_sdk import AegisGatewayClient
+from aegis_sdk import AegisGatewayClient, AegisTelemetry, bind_session
 from aegis_sdk.integrations.openai_agents import (
+    AegisRunHooks,
     make_aegis_gateway_guardrail,
     make_aegis_gateway_output_guardrail,
 )
@@ -28,7 +29,12 @@ async def main() -> None:
             tools=[lookup_order],
             model=os.getenv("OPENAI_AGENT_MODEL", "gpt-4.1-mini"),
         )
-        result = await Runner.run(agent, "Look up example-order.")
+        telemetry = AegisTelemetry.from_client(client)
+        with bind_session(customer_id="example-customer"):
+            result = await Runner.run(
+                agent, "Look up example-order.", hooks=AegisRunHooks(telemetry=telemetry)
+            )
+        telemetry.shutdown()
         print(result.final_output)
 
 

@@ -11,6 +11,8 @@ from datetime import UTC, datetime
 from typing import Any
 
 from aegis_sdk.client import AegisGatewayClient, AegisGatewayError, GatewayEvaluationResponse
+from aegis_sdk.integrations.claude_agent.telemetry import ClaudeTelemetryObserver
+from aegis_sdk.telemetry import AegisTelemetry
 from aegis_sdk.types import ActionContext, GovernanceDecision
 
 logger = logging.getLogger(__name__)
@@ -40,11 +42,26 @@ class AegisClaudeGatewayHooks:
         client: AegisGatewayClient,
         *,
         user_id_resolver: UserIdResolver | None = None,
+        telemetry: AegisTelemetry | None = None,
     ) -> None:
         self.client = client
         self.user_id_resolver = user_id_resolver
+        self.telemetry_observer = ClaudeTelemetryObserver(telemetry) if telemetry else None
         self._tool_uses: dict[tuple[str, str], StoredGatewayToolUse] = {}
         self.trace: list[dict[str, Any]] = []
+
+    async def user_prompt_submit(
+        self,
+        input_data: dict[str, Any],
+        tool_use_id: str | None,
+        context: ClaudeHookContext,
+    ) -> HookOutput:
+        """Open the session for this turn with the user's prompt as its input."""
+
+        session_id = input_data.get("session_id")
+        if self.telemetry_observer is not None and session_id:
+            self.telemetry_observer.start_session(session_id, prompt=input_data.get("prompt"))
+        return {}
 
     async def pre_tool_use(
         self,
@@ -211,10 +228,11 @@ def make_aegis_claude_gateway_hooks(
     client: AegisGatewayClient,
     *,
     user_id_resolver: UserIdResolver | None = None,
+    telemetry: AegisTelemetry | None = None,
 ) -> AegisClaudeGatewayHooks:
     """Create stateful Claude hook callbacks for the Aegis API gateway."""
 
-    return AegisClaudeGatewayHooks(client, user_id_resolver=user_id_resolver)
+    return AegisClaudeGatewayHooks(client, user_id_resolver=user_id_resolver, telemetry=telemetry)
 
 
 def _build_action_context(

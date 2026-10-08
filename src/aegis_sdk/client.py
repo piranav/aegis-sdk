@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 import os
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from typing import Any
 
 import httpx
 from pydantic import Field
 
+from aegis_sdk.errors import AegisGatewayError
+from aegis_sdk.telemetry.events import TelemetryIngestResult
 from aegis_sdk.types import ActionContext, GovernanceDecision
 
 
@@ -16,21 +18,6 @@ class GatewayEvaluationResponse(GovernanceDecision):
     """Decision response returned by the API gateway."""
 
     audit_id: str = Field(description="Audit id used to correlate result evaluation")
-
-
-class AegisGatewayError(RuntimeError):
-    """Raised when the Aegis gateway rejects or cannot process a request."""
-
-    def __init__(
-        self,
-        message: str,
-        *,
-        status_code: int | None = None,
-        response: httpx.Response | None = None,
-    ) -> None:
-        self.status_code = status_code
-        self.response = response
-        super().__init__(message)
 
 
 class AegisGatewayClient:
@@ -126,6 +113,28 @@ class AegisGatewayClient:
             },
         )
         return GatewayEvaluationResponse.model_validate(response.json())
+
+    def send_telemetry(self, events: Sequence[Mapping[str, Any]]) -> TelemetryIngestResult:
+        """Report a batch of telemetry events through ``POST /v1/telemetry/events``.
+
+        Most callers use ``AegisTelemetry``, which batches and sends in the background.
+        """
+
+        response = self._request("POST", "/v1/telemetry/events", json={"events": list(events)})
+        return TelemetryIngestResult.model_validate(response.json())
+
+    def put_inventory_manifest(self, manifest: Mapping[str, Any]) -> dict[str, Any]:
+        """Replace this agent's declared components through ``PUT /v1/inventory/manifest``.
+
+        Most callers use ``AegisInventory``, which sends only when the manifest changes.
+        """
+
+        return self._request("PUT", "/v1/inventory/manifest", json=dict(manifest)).json()
+
+    def send_inventory_usage(self, usages: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
+        """Report component usage through ``POST /v1/inventory/usage``."""
+
+        return self._request("POST", "/v1/inventory/usage", json={"usages": list(usages)}).json()
 
     def _request(self, method: str, path: str, **kwargs: Any) -> httpx.Response:
         headers = kwargs.pop("headers", {})

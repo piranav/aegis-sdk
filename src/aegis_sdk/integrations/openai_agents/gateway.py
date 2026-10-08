@@ -16,6 +16,7 @@ from agents import (
 )
 
 from aegis_sdk.client import AegisGatewayClient, AegisGatewayError, GatewayEvaluationResponse
+from aegis_sdk.integrations.openai_agents.run_scope import run_scope
 from aegis_sdk.types import ActionContext
 
 UserIdResolver = Callable[[ToolInputGuardrailData | ToolOutputGuardrailData], str | None]
@@ -136,6 +137,8 @@ def _build_action_context(
         tool_name=data.context.tool_name,
         tool_args=_parse_tool_args(data.context.tool_arguments),
         user_id=user_id,
+        # Ties the governed tool call to the run's Aegis session.
+        session_id=run_scope(data.context).session_id,
     )
 
 
