@@ -25,12 +25,14 @@ class ApiError(Exception):
         return self.status in (401, 403)
 
 
-def request(api_url: str, path: str, body: dict, key: str | None = None) -> dict:
+def request(
+    api_url: str, path: str, body: dict, key: str | None = None, method: str = "POST"
+) -> dict:
     headers = {"Content-Type": "application/json", "User-Agent": f"aegis-plugin/{VERSION}"}
     if key:
         headers["X-API-Key"] = key
     req = urllib.request.Request(
-        api_url.rstrip("/") + path, data=json.dumps(body).encode(), headers=headers
+        api_url.rstrip("/") + path, data=json.dumps(body).encode(), headers=headers, method=method
     )
     try:
         with urllib.request.urlopen(req, timeout=TIMEOUT) as response:
@@ -98,12 +100,46 @@ class State:
         except OSError:
             return None
 
+    def inventory_digest(self, scope: str) -> str | None:
+        return read_json_file(self.dir / "inventory.json").get(scope)
+
+    def remember_inventory(self, scope: str, digest: str) -> None:
+        path = self.dir / "inventory.json"
+        digests = read_json_file(path)
+        digests[scope] = digest
+        self.dir.mkdir(parents=True, exist_ok=True, mode=0o700)
+        tmp = path.with_suffix(".tmp")
+        tmp.write_text(json.dumps(digests))
+        os.replace(tmp, path)
+
+    def usage_cursor(self, session_id: str) -> dict:
+        return read_json_file(self.dir / "usage" / f"{_safe(session_id)}.json")
+
+    def save_usage_cursor(self, session_id: str, cursor: dict) -> None:
+        folder = self.dir / "usage"
+        folder.mkdir(parents=True, exist_ok=True, mode=0o700)
+        path = folder / f"{_safe(session_id)}.json"
+        tmp = path.with_suffix(".tmp")
+        tmp.write_text(json.dumps(cursor))
+        os.replace(tmp, path)
+
+    def forget_usage_cursor(self, session_id: str) -> None:
+        (self.dir / "usage" / f"{_safe(session_id)}.json").unlink(missing_ok=True)
+
     def clear_session(self, session_id: str) -> None:
         folder = self.pending / _safe(session_id)
         if folder.is_dir():
             for child in folder.iterdir():
                 child.unlink(missing_ok=True)
             folder.rmdir()
+
+
+def read_json_file(path: Path) -> dict:
+    try:
+        data = json.loads(path.read_text())
+    except (OSError, ValueError):
+        return {}
+    return data if isinstance(data, dict) else {}
 
 
 def _safe(value: str) -> str:

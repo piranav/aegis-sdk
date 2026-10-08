@@ -39,7 +39,7 @@ working model. From a terminal: `python3 scripts/aegis.py connect <code> --tool 
 
 | Event | Behavior |
 | --- | --- |
-| Session start | Reports liveness; reminds the person to connect if they haven't |
+| Session start | Reports liveness and, when it changed, the assistant's inventory; reminds the person to connect if they haven't |
 | Prompt | Answers `aegis ...` commands; evaluates other prompts and blocks denied ones |
 | Before a tool call | Allow, deny, or ask the person (Codex can't ask yet, so it refuses) |
 | After a tool call | Evaluates the result against output rules |
@@ -48,6 +48,15 @@ working model. From a terminal: `python3 scripts/aegis.py connect <code> --tool 
 Each tool call is sent with its canonical action (`file.read`, `file.write`,
 `shell.exec`, `mcp.call`, `web.fetch`) and the files it touches, so one rule can hold
 across assistants.
+
+At session start the plugin also reports what the assistant is set up with in the
+current project: MCP servers, enabled plugins (with their skills, subagents, and MCP
+servers), skills, subagents, and the default model, read from the same files the
+assistant reads (`~/.claude.json`, `.mcp.json`, Claude settings and plugin installs,
+`~/.codex/config.toml`, the Codex plugin cache, and skills folders). Only names and
+locations are sent: never server environment variables, headers, arguments, or tokens,
+and URLs are reduced to scheme, host, and path. A manifest is sent only when it changed.
+Each adapter names its `Scanner` in `aegis_plugin/inventory.py`.
 
 Keys are stored per assistant at `~/.aegis/<assistant>/credentials.json` (mode 0600).
 Requires `python3` (standard library only). If Aegis is unreachable, the plugin follows
@@ -61,6 +70,6 @@ managed settings (`enabledPlugins`, `strictKnownMarketplaces`) or Codex
 ## Adding an assistant
 
 Add an adapter in `scripts/aegis_plugin/adapters.py` (event names, canonical tool
-actions, account details, decision formats), a hooks file that calls
+actions, account details, decision formats, and a `Scanner` for its configuration), a hooks file that calls
 `aegis.py hook <assistant> <Event>`, and the assistant's manifest. The engine,
 connection handling, and API client are shared.

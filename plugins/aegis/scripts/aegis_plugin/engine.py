@@ -16,11 +16,17 @@ from aegis_plugin.adapters import (
     PROMPT,
     SESSION_END,
     SESSION_START,
+    STOP,
     Adapter,
     Event,
     Output,
 )
 from aegis_plugin.client import ApiError, State, decode_code, request
+from aegis_plugin.inventory import manifest_digest
+from aegis_plugin.usage import chunks, read_usage, safe_path
+
+# Hooks have short timeouts (Claude Code's SessionEnd allows a few seconds).
+USAGE_TIME_BUDGET_SECONDS = 1.5
 
 # "aegis connect <code>", "aegis status", "aegis disconnect", typed as a message. The
 # plugin answers these itself, so connection codes never reach the model provider.
@@ -141,12 +147,19 @@ class Engine:
                 self.heartbeat(creds, "session_start", self.client_info())
             except ApiError as exc:
                 return self.unavailable(event, creds, exc)
+            self.report_inventory(creds, event)
+            self.report_usage(creds, event, opening=True)
             return a.allow(event)
 
         if not creds:
             return a.allow(event)
 
+        if event.kind == STOP:
+            self.report_usage(creds, event)
+            return a.allow(event)
+
         if event.kind == SESSION_END:
+            self.report_usage(creds, event, final=True)
             self.state.clear_session(event.session_id)
             try:
                 self.heartbeat(creds, "session_end", {})
@@ -186,6 +199,90 @@ class Engine:
             return self.decide(event, creds, "/v1/evaluate_result", body)
 
         return a.allow(event)
+
+    def report_inventory(self, creds: dict, event: Event) -> None:
+        """Send what this assistant is configured with, when it changed. Best effort."""
+        scanner = self.adapter.scanner
+        if scanner is None:
+            return
+        try:
+            manifest = scanner.manifest(event.cwd, event.model)
+            digest = manifest_digest(manifest)
+            previous = self.state.inventory_digest(manifest["scope"])
+            if digest == previous or (previous is None and not manifest["components"]):
+                return
+            request(
+                creds["api_url"],
+                "/v1/inventory/manifest",
+                manifest,
+                creds["api_key"],
+                method="PUT",
+            )
+            self.state.remember_inventory(manifest["scope"], digest)
+        except Exception:  # noqa: BLE001 - the inventory must never hold up a session
+            return
+
+    def report_usage(
+        self, creds: dict, event: Event, *, opening: bool = False, final: bool = False
+    ) -> None:
+        """Send model calls the assistant recorded since the last report. Best effort.
+
+        The session opens on its first report and closes on the final one, so the
+        dashboard shows the assistant's sessions with their tokens next to its tool calls.
+        """
+        fmt = self.adapter.transcript
+        if fmt is None or not event.session_id:
+            return
+        now = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+        events = []
+        if opening:
+            events.append(
+                {
+                    "type": "session.start",
+                    "session_id": event.session_id,
+                    "occurred_at": now,
+                    "framework": self.adapter.tool,
+                }
+            )
+        cursor = self.state.usage_cursor(event.session_id)
+        batch = None
+        if safe_path(event.transcript_path):
+            # Catch up in bounded reads until the end of the file or the time budget, so
+            # a long session's first report (or its last) doesn't leave usage unread.
+            deadline = time.monotonic() + USAGE_TIME_BUDGET_SECONDS
+            while time.monotonic() < deadline:
+                step = read_usage(
+                    fmt,
+                    event.transcript_path,
+                    event.session_id,
+                    cursor,
+                    hook_model=event.model,
+                    final=final,
+                )
+                if step is None or step.offset == int(cursor.get("offset") or 0):
+                    break
+                events.extend(step.events)
+                batch = step
+                cursor = {"offset": step.offset, "model": step.model, **step.links}
+                if step.at_end:
+                    break
+        if final:
+            events.append(
+                {"type": "session.end", "session_id": event.session_id, "occurred_at": now}
+            )
+        try:
+            for part in chunks(events):
+                request(
+                    creds["api_url"], "/v1/telemetry/events", {"events": part}, creds["api_key"]
+                )
+        except Exception:  # noqa: BLE001 - usage reporting must never hold up the assistant
+            return
+        if final:
+            self.state.forget_usage_cursor(event.session_id)
+        elif batch is not None:
+            self.state.save_usage_cursor(
+                event.session_id, {"offset": batch.offset, "model": batch.model, **batch.links}
+            )
 
     def decide(self, event: Event, creds: dict, path: str, body: dict) -> Output:
         try:

@@ -1,8 +1,9 @@
 """Per-assistant adapters: hook payloads in, decision formats out.
 
 Adding an assistant means subclassing ``Adapter``: parse its hook payloads into an
-``Event``, describe its tools in canonical terms, and render decisions in its output
-format. The engine, connection, and API handling are shared.
+``Event``, describe its tools in canonical terms, render decisions in its output
+format, and name the ``Scanner`` that reads its configuration for the inventory. The
+engine, connection, and API handling are shared.
 """
 
 from __future__ import annotations
@@ -14,11 +15,15 @@ from base64 import urlsafe_b64decode
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from aegis_plugin.inventory import ClaudeCodeScanner, CodexScanner, Scanner
+from aegis_plugin.usage import ClaudeTranscript, CodexRollout
+
 SESSION_START = "session_start"
 SESSION_END = "session_end"
 PROMPT = "prompt"
 PRE_TOOL = "pre_tool"
 POST_TOOL = "post_tool"
+STOP = "stop"  # the assistant finished responding to a prompt
 
 
 @dataclass
@@ -30,6 +35,9 @@ class Event:
     tool_input: dict = field(default_factory=dict)
     tool_use_id: str = ""
     tool_response: object = None
+    cwd: str = ""
+    model: str = ""
+    transcript_path: str = ""
 
 
 @dataclass
@@ -47,6 +55,10 @@ class Adapter:
     events: dict[str, str] = {}
     # Vendor tool name -> canonical action, for rules that should hold across assistants.
     actions: dict[str, str] = {}
+    # Reads the assistant's configuration into an inventory manifest at session start.
+    scanner: Scanner | None = None
+    # Reads model calls and token usage from the assistant's session file.
+    transcript: ClaudeTranscript | CodexRollout | None = None
 
     def parse(self, event_name: str, data: dict) -> Event | None:
         kind = self.events.get(event_name)
@@ -60,6 +72,9 @@ class Adapter:
             tool_input=data.get("tool_input") if isinstance(data.get("tool_input"), dict) else {},
             tool_use_id=str(data.get("tool_use_id") or ""),
             tool_response=data.get("tool_response", data.get("tool_output")),
+            cwd=str(data.get("cwd") or ""),
+            model=_model_name(data.get("model")),
+            transcript_path=str(data.get("transcript_path") or ""),
         )
 
     def action(self, event: Event) -> str:
@@ -116,15 +131,25 @@ class Adapter:
         return Output({"decision": "block", "reason": message})
 
 
+def _model_name(value: object) -> str:
+    """Hook payloads carry the model as a name or as ``{"id": ..., ...}``."""
+    if isinstance(value, dict):
+        value = value.get("id") or value.get("name")
+    return value if isinstance(value, str) else ""
+
+
 class ClaudeCode(Adapter):
     tool = "claude-code"
     label = "Claude Code"
+    scanner = ClaudeCodeScanner()
+    transcript = ClaudeTranscript()
     events = {
         "SessionStart": SESSION_START,
         "SessionEnd": SESSION_END,
         "UserPromptSubmit": PROMPT,
         "PreToolUse": PRE_TOOL,
         "PostToolUse": POST_TOOL,
+        "Stop": STOP,
     }
     actions = {
         "Read": "file.read",
@@ -159,12 +184,15 @@ PATCH_FILE = re.compile(r"^\*\*\* (?:Add|Update|Delete) File: (.+)$", re.MULTILI
 class Codex(Adapter):
     tool = "codex"
     label = "Codex"
+    scanner = CodexScanner()
+    transcript = CodexRollout()
     events = {
         "SessionStart": SESSION_START,
         "SessionEnd": SESSION_END,
         "UserPromptSubmit": PROMPT,
         "PreToolUse": PRE_TOOL,
         "PostToolUse": POST_TOOL,
+        "Stop": STOP,
     }
     actions = {
         "Bash": "shell.exec",
