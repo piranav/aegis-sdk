@@ -22,6 +22,7 @@ import json
 import os
 import time
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
 from pathlib import Path
 
 MAX_READ_BYTES = 4 * 1024 * 1024
@@ -405,6 +406,21 @@ def read_usage(
 def _utc_second(timestamp: str) -> str:
     """``2026-10-09T18:32:45.762Z`` -> ``2026-10-09T18:32:45``: both assistants write UTC."""
     return timestamp[:19]
+
+
+def tracked_since(creds: dict) -> str:
+    """When this assistant's usage is tracked from, as ``YYYY-MM-DDTHH:MM:SS`` UTC: the
+    server's first-connection time, else (older servers) when this machine connected."""
+    tracked = creds.get("tracked_since")
+    if isinstance(tracked, str) and len(tracked) >= 19:
+        try:
+            moment = datetime.fromisoformat(tracked.replace("Z", "+00:00"))
+            if moment.tzinfo is not None:
+                moment = moment.astimezone(UTC)
+            return moment.strftime("%Y-%m-%dT%H:%M:%S")
+        except ValueError:
+            pass
+    return utc_iso(creds.get("connected_at"))
 
 
 def utc_iso(epoch_seconds) -> str:
