@@ -8,22 +8,27 @@ Supported: **Claude Code** and **Codex**. One plugin directory serves both.
 
 ## Install
 
-Your IT team sends a code.
+Your IT team sends a code. Run the install commands in a terminal; each one prints
+success or the exact error.
 
 **Claude Code**
 
-```text
-/plugin marketplace add piranav/aegis-sdk
-/plugin install aegis@aegis
+```bash
+claude plugin marketplace add https://github.com/piranav/aegis-sdk.git
+claude plugin install aegis@aegis
 ```
 
-**Codex** (in a terminal, then in Codex)
+The HTTPS URL works without a GitHub SSH key; the `piranav/aegis-sdk` shorthand tries
+SSH first.
 
-```text
+**Codex** (update Codex first if `codex plugin` is not recognized)
+
+```bash
 codex plugin marketplace add piranav/aegis-sdk
 codex plugin add aegis@aegis
-/hooks      review and trust the Aegis hooks
 ```
+
+Then, in Codex, send `/hooks` and trust the Aegis hooks.
 
 Then start a new session and send this as a message:
 
