@@ -23,7 +23,7 @@ from aegis_plugin.adapters import (
 )
 from aegis_plugin.client import ApiError, State, decode_code, request
 from aegis_plugin.inventory import manifest_digest
-from aegis_plugin.usage import chunks, read_usage, safe_path, utc_iso
+from aegis_plugin.usage import chunks, read_usage, safe_path, tracked_since
 
 # Hooks have short timeouts (Claude Code's SessionEnd allows a few seconds).
 USAGE_TIME_BUDGET_SECONDS = 1.5
@@ -73,6 +73,7 @@ class Engine:
                 "email": result.get("email"),
                 "failure_mode": result.get("failure_mode", "open"),
                 "connected_at": int(time.time()),
+                "tracked_since": result.get("tracked_since"),
             }
         )
         return (
@@ -116,9 +117,16 @@ class Engine:
             {"event": event, "client": client},
             creds["api_key"],
         )
+        changed = False
         mode = result.get("failure_mode")
         if mode in ("open", "closed") and mode != creds.get("failure_mode"):
             creds["failure_mode"] = mode
+            changed = True
+        tracked = result.get("tracked_since")
+        if isinstance(tracked, str) and tracked != creds.get("tracked_since"):
+            creds["tracked_since"] = tracked
+            changed = True
+        if changed:
             self.state.save(creds)
         return result
 
@@ -246,9 +254,10 @@ class Engine:
                 }
             )
         cursor = self.state.usage_cursor(event.session_id)
-        # Only usage from after this assistant connected: resuming an older session must
-        # not report the weeks of work it holds from before Aegis was set up.
-        since = utc_iso(creds.get("connected_at"))
+        # Only usage from after this assistant first connected (Aegis says when, across
+        # reconnects): resuming an older session must not report the weeks of work it
+        # holds from before Aegis was set up.
+        since = tracked_since(creds)
         batch = None
         if safe_path(event.transcript_path):
             # Catch up in bounded reads until the end of the file or the time budget, so

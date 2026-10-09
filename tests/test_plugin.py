@@ -579,6 +579,27 @@ def test_usage_from_before_connecting_is_not_reported(calls, tmp_path):
     assert State("codex").usage_cursor("t-old")["offset"] == rollout.stat().st_size
 
 
+def test_tracking_starts_at_the_first_connection_across_reconnects(calls, tmp_path):
+    eng = connected("codex")
+    # Reconnected today on this machine, but Aegis has tracked it since 2026-08-01.
+    calls["responses"].append({"status": "active", "tracked_since": "2026-08-01T00:00:00+00:00"})
+    eng.heartbeat(eng.state.credentials(), "session_start", {})
+    eng.state.save({**eng.state.credentials(), "connected_at": 1791280800})
+    lines = [
+        json.dumps({"type": "turn_context", "payload": {"model": "gpt-5.6-sol"}}),
+        token_count("2026-07-30T01:00:00Z", 500, 500),  # before Aegis: not reported
+        token_count("2026-08-06T01:00:00Z", 700, 1200),  # tracked, though before reconnecting
+    ]
+    rollout = write(tmp_path / "rollout.jsonl", "\n".join(lines) + "\n")
+    handle("codex", "Stop", {"session_id": "t-2", "transcript_path": str(rollout)}, eng)
+
+    events = [e for r in calls["requests"] for e in r["body"].get("events", [])]
+    assert [e["usage"]["input_tokens"] for e in events if e["type"] == "llm.call"] == [700]
+    assert usage.tracked_since({"tracked_since": "2026-08-01T02:00:00+02:00"}) == (
+        "2026-08-01T00:00:00"
+    )
+
+
 def test_partial_last_line_is_left_for_the_next_read():
     data = (claude_line("msg_1", "done") + "\n" + claude_line("msg_2", "half")[:40]).encode()
     parsed = usage.ClaudeTranscript().parse(data, "", final=True)
