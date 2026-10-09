@@ -1,0 +1,16 @@
+{
+  "name": "aegis",
+  "displayName": "Aegis",
+  "version": "0.3.0",
+  "description": "Connects your coding assistant to your organization's Aegis governance: IT-assigned rules for tool calls and prompts, with liveness reporting.",
+  "author": {
+    "name": "Aegis"
+  },
+  "repository": "https://github.com/piranav/aegis-sdk",
+  "keywords": [
+    "governance",
+    "security",
+    "compliance"
+  ],
+  "hooks": "./hooks/claude-code.json"
+}
