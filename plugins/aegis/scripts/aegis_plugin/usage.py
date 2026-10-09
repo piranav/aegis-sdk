@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import json
 import os
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -89,6 +90,10 @@ class Links:
     pending: list = field(default_factory=list)
     names: dict = field(default_factory=dict)
     requested: list = field(default_factory=list)
+    # Codex: a usage record was read since the last ``token_count`` (which then repeats
+    # it), and the running total the last ``token_count`` reported.
+    recorded: bool = False
+    total: dict | None = None
 
     @classmethod
     def load(cls, cursor: dict) -> Links:
@@ -96,11 +101,18 @@ class Links:
             pending=list(cursor.get("pending") or []),
             names=dict(cursor.get("names") or {}),
             requested=list(cursor.get("requested") or []),
+            recorded=bool(cursor.get("recorded")),
+            total=cursor.get("total") if isinstance(cursor.get("total"), dict) else None,
         )
 
     def save(self) -> dict:
         names = dict(list(self.names.items())[-MAX_REMEMBERED_TOOLS:])
-        return {"pending": self.pending, "names": names, "requested": self.requested}
+        saved = {"pending": self.pending, "names": names, "requested": self.requested}
+        if self.recorded:
+            saved["recorded"] = True
+        if self.total:
+            saved["total"] = self.total
+        return saved
 
     def remember(self, tool_id: str, name: str, target) -> dict:
         self.names[tool_id] = [name, target]
@@ -253,7 +265,13 @@ class CodexRollout:
     """Codex session file: ``turn_context`` lines set the model, and each model response
     is a ``token_usage_record`` keyed by its response id, written after the tool calls
     it made. Tool outputs are read by the next response. Older Codex versions only write
-    ``token_count`` events; those are keyed by their position in the file."""
+    ``token_count`` events; those are keyed by their position in the file.
+
+    A thread started on an older Codex and resumed on a newer one has both: the format
+    is decided line by line, so a ``token_count`` counts only when no usage record came
+    since the previous one (newer versions write both for each response), and never when
+    its running total didn't move (a repeat of the last response, not a new one).
+    """
 
     provider = "openai"
     CALL_TYPES = ("function_call", "custom_tool_call", "local_shell_call")
@@ -270,7 +288,6 @@ class CodexRollout:
         links = links or Links()
         calls = []
         resume_at = 0
-        has_records = b'"token_usage_record"' in data
         for start, end, raw in _lines(data):
             resume_at = end
             line = _json(raw)
@@ -287,11 +304,19 @@ class CodexRollout:
                 if payload.get("call_id"):
                     links.result(str(payload["call_id"]), payload.get("output") or "")
             elif line.get("type") == "token_usage_record":
+                links.recorded = True
                 self._add(
                     calls, links, payload.get("response_id"), payload.get("usage"), model, line
                 )
-            elif not has_records and kind == "token_count":
+            elif kind == "token_count":
                 info = payload.get("info") if isinstance(payload.get("info"), dict) else {}
+                total = info.get("total_token_usage")
+                repeated = isinstance(total, dict) and total == links.total
+                if isinstance(total, dict):
+                    links.total = total
+                if links.recorded or repeated:
+                    links.recorded = False
+                    continue
                 call_id = f"codex-offset-{base_offset + start}"
                 self._add(calls, links, call_id, info.get("last_token_usage"), model, line)
         return Parsed(calls, resume_at, model, links)
@@ -330,12 +355,21 @@ class UsageBatch:
 
 
 def read_usage(
-    fmt, path: str, session_id: str, cursor: dict, *, hook_model: str = "", final: bool = False
+    fmt,
+    path: str,
+    session_id: str,
+    cursor: dict,
+    *,
+    hook_model: str = "",
+    final: bool = False,
+    since: str = "",
 ):
     """New model calls in ``path`` since ``cursor``; None if the file can't be read.
 
     ``cursor`` is the saved ``{"offset", "model", "pending", "names", ...}`` for this
     session. The returned batch carries the cursor to save once its events are delivered.
+    Calls made before ``since`` (an ISO UTC time) are read past but not reported: a
+    session resumed after connecting may hold weeks of history from before Aegis.
     """
     try:
         size = os.path.getsize(path)
@@ -354,7 +388,11 @@ def read_usage(
     else:
         # A read cut off mid-file is not the end of the session, whatever the hook says.
         parsed = fmt.parse(data, model, final and offset + len(data) >= size, links=links)
-    events = [call.event(session_id, fmt.provider) for call in parsed.calls]
+    events = [
+        call.event(session_id, fmt.provider)
+        for call in parsed.calls
+        if not (since and call.occurred_at and _utc_second(call.occurred_at) < since)
+    ]
     return UsageBatch(
         events,
         offset + parsed.resume_at,
@@ -362,6 +400,18 @@ def read_usage(
         parsed.links.save(),
         at_end=offset + len(data) >= size,
     )
+
+
+def _utc_second(timestamp: str) -> str:
+    """``2026-10-09T18:32:45.762Z`` -> ``2026-10-09T18:32:45``: both assistants write UTC."""
+    return timestamp[:19]
+
+
+def utc_iso(epoch_seconds) -> str:
+    try:
+        return time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime(int(epoch_seconds)))
+    except (TypeError, ValueError, OverflowError, OSError):
+        return ""
 
 
 def chunks(events: list):

@@ -11,6 +11,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import shlex
 from base64 import urlsafe_b64decode
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -84,7 +85,21 @@ class Adapter:
 
     def paths(self, event: Event) -> list[str]:
         keys = ("file_path", "path", "notebook_path")
-        return [str(event.tool_input[k]) for k in keys if event.tool_input.get(k)]
+        found = [str(event.tool_input[k]) for k in keys if event.tool_input.get(k)]
+        for command in self.commands(event):
+            found.extend(command_paths(command))
+        return list(dict.fromkeys(found))[:MAX_OBSERVED]
+
+    def commands(self, event: Event) -> list[str]:
+        """Shell commands the call runs, so shell and secret-file rules can see them."""
+        if self.actions.get(event.tool_name) != "shell.exec":
+            return []
+        command = event.tool_input.get("command")
+        if isinstance(command, list):  # older Codex: ["bash", "-lc", "cat .env"]
+            argv = [str(part) for part in command]
+            is_shell = len(argv) >= 3 and Path(argv[0]).name in SHELLS and "c" in argv[-2]
+            command = argv[-1] if is_shell else shlex.join(argv)
+        return [command] if isinstance(command, str) and command.strip() else []
 
     def account(self) -> dict:
         """The assistant's signed-in account, as reported by this machine."""
@@ -129,6 +144,29 @@ class Adapter:
     def reply(self, event: Event, message: str) -> Output:
         """Answer an Aegis command typed as a prompt without sending it to the model."""
         return Output({"decision": "block", "reason": message})
+
+
+MAX_OBSERVED = 16
+SHELLS = {"bash", "sh", "zsh", "dash", "fish"}
+# Words in a command that name a file: they contain a slash, start with a dot or tilde
+# (.env, ~/.ssh/id_rsa), or end in an extension (server.pem). Flags, URLs, and plain
+# words are left out.
+PATH_WORD = re.compile(r"^(?:[~.]|.*/|[^\s/]+\.[A-Za-z0-9]{1,10}$)")
+
+
+def command_paths(command: str) -> list[str]:
+    try:
+        words = shlex.split(command, comments=True)
+    except ValueError:
+        words = command.split()
+    found = []
+    for word in words:
+        word = word.lstrip("<>&|;(").rstrip(";|&)")
+        if word.startswith("-") or "://" in word or "=" in word or not PATH_WORD.match(word):
+            continue
+        if word not in (".", ".."):
+            found.append(word)
+    return found[:MAX_OBSERVED]
 
 
 def _model_name(value: object) -> str:
@@ -179,6 +217,34 @@ class ClaudeCode(Adapter):
 
 
 PATCH_FILE = re.compile(r"^\*\*\* (?:Add|Update|Delete) File: (.+)$", re.MULTILINE)
+# Codex code mode: ``exec`` runs JavaScript that calls the real tools, e.g.
+# ``tools.exec_command({cmd: "cat .env"})``. The command strings are what it runs.
+EXEC_COMMAND = re.compile(
+    r"\b(?:cmd|command)\s*:\s*(\"(?:[^\"\\]|\\.)*\"|'(?:[^'\\]|\\.)*'|`[^`]*`)"
+)
+
+
+def _js_string(literal: str) -> str:
+    quote, body = literal[0], literal[1:-1]
+    if quote == '"':
+        try:
+            return json.loads(literal)
+        except ValueError:
+            return body
+    return body.replace("\\" + quote, quote) if quote == "'" else body
+
+
+def _strings(value, depth=0):
+    if depth > 4:
+        return
+    if isinstance(value, str):
+        yield value
+    elif isinstance(value, dict):
+        for item in value.values():
+            yield from _strings(item, depth + 1)
+    elif isinstance(value, list):
+        for item in value:
+            yield from _strings(item, depth + 1)
 
 
 class Codex(Adapter):
@@ -202,10 +268,22 @@ class Codex(Adapter):
         "Write": "file.write",
     }
 
+    def action(self, event: Event) -> str:
+        if event.tool_name == "exec" and self.commands(event):
+            return "shell.exec"
+        return super().action(event)
+
     def paths(self, event: Event) -> list[str]:
         if self.action(event) == "file.write":
             return PATCH_FILE.findall(str(event.tool_input.get("command") or ""))
         return super().paths(event)
+
+    def commands(self, event: Event) -> list[str]:
+        if event.tool_name != "exec":
+            return super().commands(event)
+        script = "\n".join(_strings(event.tool_input))
+        found = [_js_string(m.group(1)) for m in EXEC_COMMAND.finditer(script)]
+        return list(dict.fromkeys(c for c in found if c.strip()))[:MAX_OBSERVED]
 
     def account(self) -> dict:
         """Email and ChatGPT plan from the ID token; no token ever leaves the machine."""
