@@ -23,7 +23,7 @@ from aegis_plugin.adapters import (
 )
 from aegis_plugin.client import ApiError, State, decode_code, request
 from aegis_plugin.inventory import manifest_digest
-from aegis_plugin.usage import chunks, read_usage, safe_path
+from aegis_plugin.usage import chunks, read_usage, safe_path, utc_iso
 
 # Hooks have short timeouts (Claude Code's SessionEnd allows a few seconds).
 USAGE_TIME_BUDGET_SECONDS = 1.5
@@ -178,13 +178,14 @@ class Engine:
             return self.decide(event, creds, "/v1/evaluate", body)
 
         if event.kind == PRE_TOOL:
+            facts = {"tool": a.tool, "action": a.action(event), "paths": a.paths(event)}
+            commands = a.commands(event)
+            if commands:
+                facts["commands"] = commands
             body = {
                 "agent_name": a.tool,
                 "tool_name": event.tool_name or "unknown",
-                "tool_args": {
-                    **event.tool_input,
-                    "_aegis": {"tool": a.tool, "action": a.action(event), "paths": a.paths(event)},
-                },
+                "tool_args": {**event.tool_input, "_aegis": facts},
                 "session_id": event.session_id,
             }
             return self.decide(event, creds, "/v1/evaluate", body)
@@ -245,6 +246,9 @@ class Engine:
                 }
             )
         cursor = self.state.usage_cursor(event.session_id)
+        # Only usage from after this assistant connected: resuming an older session must
+        # not report the weeks of work it holds from before Aegis was set up.
+        since = utc_iso(creds.get("connected_at"))
         batch = None
         if safe_path(event.transcript_path):
             # Catch up in bounded reads until the end of the file or the time budget, so
@@ -258,6 +262,7 @@ class Engine:
                     cursor,
                     hook_model=event.model,
                     final=final,
+                    since=since,
                 )
                 if step is None or step.offset == int(cursor.get("offset") or 0):
                     break
@@ -331,8 +336,8 @@ class Engine:
 
 
 def explain(result: dict) -> str:
-    violations = "; ".join(result.get("violations") or []) or "Blocked by an organization rule"
-    text = f"[Aegis] {violations}"
+    reasons = [v.strip().rstrip(".") for v in result.get("violations") or [] if v.strip()]
+    text = "[Aegis] " + ("; ".join(reasons) or "Blocked by an organization rule")
     if result.get("support_message"):
         text += f". {result['support_message']}"
     if result.get("support_email"):

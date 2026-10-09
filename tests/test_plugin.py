@@ -111,6 +111,42 @@ def test_codex_patch_is_described_in_canonical_terms(calls):
     assert "Secret files are off limits" in decision["permissionDecisionReason"]
 
 
+@pytest.mark.parametrize(
+    ("tool", "tool_name", "tool_input", "commands"),
+    [
+        ("claude-code", "Bash", {"command": "cat .env | grep OPENAI"}, ["cat .env | grep OPENAI"]),
+        ("codex", "Bash", {"command": ["bash", "-lc", "cat .env"]}, ["cat .env"]),
+        (
+            "codex",
+            "exec",
+            {"input": 'await tools.exec_command({cmd: "cat .env", max_output_tokens: 2000});'},
+            ["cat .env"],
+        ),
+    ],
+)
+def test_shell_commands_and_the_files_they_touch_reach_aegis(
+    calls, tool, tool_name, tool_input, commands
+):
+    eng = connected(tool)
+    handle(
+        tool,
+        "PreToolUse",
+        {"session_id": "s", "tool_name": tool_name, "tool_input": tool_input},
+        eng,
+    )
+    meta = calls["requests"][0]["body"]["tool_args"]["_aegis"]
+    assert meta["action"] == "shell.exec"
+    assert meta["commands"] == commands
+    assert ".env" in meta["paths"]
+
+
+def test_command_paths_keep_files_and_skip_flags_words_and_urls():
+    found = adapters.command_paths(
+        "curl -s https://x.dev/a > out.json && sed -n 1,5p ~/.ssh/config src/app.py README"
+    )
+    assert found == ["out.json", "~/.ssh/config", "src/app.py"]
+
+
 def test_escalation_asks_in_claude_code_and_refuses_in_codex(calls):
     for tool, expected in (("claude-code", "ask"), ("codex", "deny")):
         eng = connected(tool)
@@ -328,6 +364,8 @@ def test_codex_scanner_reads_config_toml_plugins_and_skills(tmp_path, monkeypatc
     plugin_root = codex_home / "plugins/cache/openai-curated/github/0.1.12"
     write(plugin_root / ".codex-plugin/plugin.json", {"name": "github", "version": "0.1.12"})
     skill(plugin_root / "skills", "pr-review", "Review pull requests")
+    # Frontmatter names may differ from the folder Codex opens the skill by.
+    write(plugin_root / "skills/slides/SKILL.md", "---\nname: Slides\n---\nBody")
     write(plugin_root / ".mcp.json", {"mcpServers": {"github_app": {"command": "launch"}}})
     skill(project / ".agents/skills", "release", "Cut a release")
 
@@ -337,7 +375,7 @@ def test_codex_scanner_reads_config_toml_plugins_and_skills(tmp_path, monkeypatc
     assert ("model", "gpt-5.2-codex") in found and ("model", "gpt-5.1-codex") not in found
     assert found[("mcp_server", "docs")]["locator"] == "https://developers.openai.com/mcp"
     assert found[("mcp_server", "repl")]["attributes"] == {"scope": "user", "enabled": False}
-    assert [c["name"] for c in found[("plugin", "github")]["children"]] == ["pr-review"]
+    assert [c["name"] for c in found[("plugin", "github")]["children"]] == ["pr-review", "slides"]
     # Codex keeps plugin servers' own names in tool calls (mcp__github_app__...).
     assert found[("mcp_server", "github_app")]["attributes"] == {"plugin": "github"}
     assert ("plugin", "pets") not in found
@@ -482,6 +520,63 @@ def test_older_codex_token_count_events_are_keyed_by_file_position():
     )
     parsed = usage.CodexRollout().parse((line + "\n").encode(), "gpt-5", False, base_offset=700)
     assert [c.call_id for c in parsed.calls] == ["codex-offset-700"]
+
+
+def token_count(timestamp, last, total):
+    return json.dumps(
+        {
+            "type": "event_msg",
+            "timestamp": timestamp,
+            "payload": {
+                "type": "token_count",
+                "info": {
+                    "last_token_usage": {"input_tokens": last, "output_tokens": 1},
+                    "total_token_usage": {"input_tokens": total, "output_tokens": 1},
+                },
+            },
+        }
+    )
+
+
+def test_a_thread_resumed_on_newer_codex_counts_each_response_once(monkeypatch, tmp_path):
+    # Months on an older Codex (token_count only, one of them a repeat), then resumed on
+    # a newer one that writes a usage record and a token_count for the same response.
+    monkeypatch.setattr(usage, "MAX_READ_BYTES", 300)  # the format changes between reads
+    lines = [
+        json.dumps({"type": "turn_context", "payload": {"model": "gpt-5.6-sol"}}),
+        token_count("2026-08-06T01:00:00Z", 100, 100),
+        token_count("2026-08-06T01:00:01Z", 100, 100),  # repeated, not a new response
+        token_count("2026-08-06T01:00:02Z", 200, 300),
+        codex_lines()[3],
+        token_count("2026-10-06T10:00:01Z", 3000, 3300),
+    ]
+    rollout = write(tmp_path / "rollout.jsonl", "\n".join(lines) + "\n")
+    cursor, ids = {}, []
+    while True:
+        batch = usage.read_usage(usage.CodexRollout(), str(rollout), "t", cursor)
+        ids += [(e["call_id"], e["usage"]["input_tokens"]) for e in batch.events]
+        if batch.at_end:
+            break
+        cursor = {"offset": batch.offset, "model": batch.model, **batch.links}
+    assert [tokens for _, tokens in ids] == [100, 200, 3000]
+    assert ids[-1][0] == "resp_1"
+
+
+def test_usage_from_before_connecting_is_not_reported(calls, tmp_path):
+    eng = connected("codex")
+    eng.state.save({**eng.state.credentials(), "connected_at": 1791280800})  # 2026-10-06T10:00Z
+    lines = [
+        json.dumps({"type": "turn_context", "payload": {"model": "gpt-5.6-sol"}}),
+        token_count("2026-08-06T01:00:00Z", 90_000_000, 90_000_000),
+        token_count("2026-10-06T10:00:05Z", 4_000, 90_004_000),
+    ]
+    rollout = write(tmp_path / "rollout.jsonl", "\n".join(lines) + "\n")
+    handle("codex", "Stop", {"session_id": "t-old", "transcript_path": str(rollout)}, eng)
+
+    events = [e for r in calls["requests"] for e in r["body"].get("events", [])]
+    assert [e["usage"]["input_tokens"] for e in events if e["type"] == "llm.call"] == [4_000]
+    # The history is read past, not re-read on every turn.
+    assert State("codex").usage_cursor("t-old")["offset"] == rollout.stat().st_size
 
 
 def test_partial_last_line_is_left_for_the_next_read():

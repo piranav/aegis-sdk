@@ -144,8 +144,12 @@ def frontmatter(path):
     return fields
 
 
-def skills_in(directory, **attributes):
-    """Each ``<dir>/<skill>/SKILL.md`` is a skill named by its frontmatter or folder."""
+def skills_in(directory, by_folder=False, **attributes):
+    """Each ``<dir>/<skill>/SKILL.md`` is a skill named by its frontmatter or folder.
+
+    ``by_folder`` names it by folder only: Codex has no skill tool and opens a skill by
+    reading its ``SKILL.md``, so the folder is the name Aegis sees it used by.
+    """
     found = []
     try:
         entries = sorted(Path(directory).iterdir())[:MAX_SKILLS_PER_DIR]
@@ -159,7 +163,7 @@ def skills_in(directory, **attributes):
         found.append(
             component(
                 "skill",
-                meta.get("name") or entry.name,
+                entry.name if by_folder else meta.get("name") or entry.name,
                 description=meta.get("description"),
                 fingerprint=_digest(manifest),
                 attributes=attributes or None,
@@ -189,7 +193,7 @@ def agents_in(directory, **attributes):
     return found
 
 
-def plugin_contents(name, root, manifest_dir, server_name):
+def plugin_contents(name, root, manifest_dir, server_name, skills_by_folder=False):
     """A plugin's own skills and subagents, plus the MCP servers it starts.
 
     Skills and subagents nest under the plugin because assistants invoke them as
@@ -198,7 +202,7 @@ def plugin_contents(name, root, manifest_dir, server_name):
     """
     root = Path(root)
     meta = read_json(root / manifest_dir / "plugin.json")
-    children = skills_in(root / "skills") + agents_in(root / "agents")
+    children = skills_in(root / "skills", by_folder=skills_by_folder) + agents_in(root / "agents")
     servers = read_json(root / ".mcp.json")
     servers = servers.get("mcpServers", servers) if isinstance(servers, dict) else {}
     mcp = [
@@ -338,7 +342,11 @@ class CodexScanner(Scanner):
             path = _latest_version(codex_home / "plugins" / "cache" / marketplace / name)
             if path is not None:
                 # Codex keeps a plugin server's own name (mcp__codex_app__...).
-                found.extend(plugin_contents(name, path, ".codex-plugin", self.plugin_server_name))
+                found.extend(
+                    plugin_contents(
+                        name, path, ".codex-plugin", self.plugin_server_name, skills_by_folder=True
+                    )
+                )
             else:
                 found.append(component("plugin", name))
 
@@ -348,7 +356,7 @@ class CodexScanner(Scanner):
             (project / ".agents" / "skills", "project"),
             (project / ".codex" / "skills", "project"),
         ):
-            found.extend(skills_in(base, scope=scope))
+            found.extend(skills_in(base, by_folder=True, scope=scope))
         return found
 
 
