@@ -776,3 +776,115 @@ def test_codex_results_are_read_by_the_next_response():
     assert calls["resp_2"].tool_calls == [{"id": "c2", "name": "mcp__docs__search"}]
     assert calls["resp_3"].tool_results[0]["name"] == "mcp__docs__search"
     assert "PRIVATE" not in json.dumps([c.event("s", "openai") for c in parsed.calls])
+
+
+HELD = {
+    "decision": "escalate",
+    "audit_id": "audit-held",
+    "violations": ["Exports leave the company"],
+    "confirmation": {
+        "id": "conf-1",
+        "question": "Before I run `Bash` (command: export), ... Should I go ahead?",
+        "agent_instruction": "[AEGIS] CONFIRMATION NEEDED: ask the user first.",
+    },
+}
+CALL = {"session_id": "s", "tool_name": "Bash", "tool_input": {"command": "./export q3"}}
+
+
+def test_claude_code_prompt_answer_is_reported_and_the_result_checked_as_approved(calls):
+    eng = connected("claude-code")
+    calls["responses"].append(HELD)
+    out = handle("claude-code", "PreToolUse", {**CALL, "tool_use_id": "t1"}, eng)
+    assert out.payload["hookSpecificOutput"]["permissionDecision"] == "ask"
+    assert "Should I go ahead?" in out.payload["hookSpecificOutput"]["permissionDecisionReason"]
+
+    # The call ran, so the person allowed it in Claude Code's prompt.
+    calls["responses"] += [
+        {"status": "approved"},
+        {"decision": "allow", "audit_id": "audit-approved"},
+        {"decision": "allow"},
+    ]
+    handle("claude-code", "PostToolUse", {**CALL, "tool_use_id": "t1", "tool_response": "ok"}, eng)
+    reply, retried, result = (r["body"] for r in calls["requests"][-3:])
+    assert calls["requests"][-3]["path"] == "/v1/confirmations/conf-1/reply"
+    assert reply["source"] == "assistant_prompt"
+    assert retried["confirmation_id"] == "conf-1"
+    assert result["audit_id"] == "audit-approved"
+
+
+def test_claude_code_skipping_prompts_and_codex_ask_in_the_conversation(calls):
+    for tool, extra in (("codex", {}), ("claude-code", {"permission_mode": "bypassPermissions"})):
+        calls["requests"].clear()
+        eng = connected(tool)
+        handle(tool, "UserPromptSubmit", {"session_id": "s", "prompt": "export q3"}, eng)
+        calls["responses"].append(HELD)
+        held = handle(tool, "PreToolUse", {**CALL, **extra, "tool_use_id": "t1"}, eng)
+        assert held.payload["hookSpecificOutput"]["permissionDecision"] == "deny"
+        assert (
+            "CONFIRMATION NEEDED" in held.payload["hookSpecificOutput"]["permissionDecisionReason"]
+        )
+
+        # A retry before the person answers relays nothing.
+        calls["responses"].append(HELD)
+        handle(tool, "PreToolUse", {**CALL, **extra, "tool_use_id": "t2"}, eng)
+        assert not any(r["path"].endswith("/reply") for r in calls["requests"])
+
+        handle(tool, "UserPromptSubmit", {"session_id": "s", "prompt": "yes go ahead"}, eng)
+        calls["responses"] += [{"status": "approved"}, {"decision": "allow", "audit_id": "a"}]
+        done = handle(tool, "PreToolUse", {**CALL, **extra, "tool_use_id": "t3"}, eng)
+        assert done.payload is None
+        assert calls["requests"][-2]["body"]["message"] == "yes go ahead"
+        assert calls["requests"][-1]["body"]["confirmation_id"] == "conf-1"
+
+
+def test_a_no_in_the_conversation_stops_the_call(calls):
+    eng = connected("codex")
+    handle("codex", "UserPromptSubmit", {"session_id": "s", "prompt": "export q3"}, eng)
+    calls["responses"].append(HELD)
+    handle("codex", "PreToolUse", {**CALL, "tool_use_id": "t1"}, eng)
+    handle("codex", "UserPromptSubmit", {"session_id": "s", "prompt": "no, don't"}, eng)
+    calls["responses"].append({"status": "declined"})
+    out = handle("codex", "PreToolUse", {**CALL, "tool_use_id": "t2"}, eng)
+    assert "not run" in out.payload["hookSpecificOutput"]["permissionDecisionReason"]
+    assert calls["requests"][-1]["path"].endswith("/reply")
+
+
+def test_when_codex_already_asked_the_person_is_not_asked_twice(calls, tmp_path):
+    rollout = tmp_path / "rollout.jsonl"
+    lines = [
+        {
+            "type": "response_item",
+            "payload": {
+                "type": "message",
+                "role": "user",
+                "content": [{"type": "input_text", "text": "export the q3 report"}],
+            },
+        },
+        {
+            "type": "response_item",
+            "payload": {
+                "type": "message",
+                "role": "assistant",
+                "content": [{"type": "output_text", "text": "Export q3 outside the company?"}],
+            },
+        },
+        {
+            "type": "response_item",
+            "payload": {
+                "type": "message",
+                "role": "user",
+                "content": [{"type": "input_text", "text": "yes"}],
+            },
+        },
+    ]
+    rollout.write_text("\n".join(json.dumps(line) for line in lines))
+    eng = connected("codex")
+    handle("codex", "UserPromptSubmit", {"session_id": "s", "prompt": "yes"}, eng)
+    calls["responses"] += [HELD, {"status": "approved"}, {"decision": "allow", "audit_id": "a"}]
+    out = handle(
+        "codex", "PreToolUse", {**CALL, "tool_use_id": "t1", "transcript_path": str(rollout)}, eng
+    )
+    assert out.payload is None
+    reply = calls["requests"][-2]["body"]
+    assert reply["agent_question"] == "Export q3 outside the company?"
+    assert reply["message"] == "yes"

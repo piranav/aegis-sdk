@@ -126,7 +126,26 @@ class State:
     def forget_usage_cursor(self, session_id: str) -> None:
         (self.dir / "usage" / f"{_safe(session_id)}.json").unlink(missing_ok=True)
 
+    # Questions waiting on the person's answer (see Engine.confirm), and their latest
+    # prompt, which may be that answer. One file per session.
+
+    def _confirmations_path(self, session_id: str) -> Path:
+        return self.dir / "confirmations" / f"{_safe(session_id)}.json"
+
+    def confirmations(self, session_id: str) -> dict:
+        return read_json_file(self._confirmations_path(session_id))
+
+    def save_confirmations(self, session_id: str, data: dict) -> None:
+        path = self._confirmations_path(session_id)
+        path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        tmp = path.with_suffix(".tmp")
+        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, "w") as handle:
+            json.dump(data, handle)
+        os.replace(tmp, path)
+
     def clear_session(self, session_id: str) -> None:
+        self._confirmations_path(session_id).unlink(missing_ok=True)
         folder = self.pending / _safe(session_id)
         if folder.is_dir():
             for child in folder.iterdir():

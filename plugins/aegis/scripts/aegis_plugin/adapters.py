@@ -39,6 +39,8 @@ class Event:
     cwd: str = ""
     model: str = ""
     transcript_path: str = ""
+    # The assistant's permission mode (Claude Code), e.g. "default" or "bypassPermissions".
+    permission_mode: str = ""
 
 
 @dataclass
@@ -76,6 +78,7 @@ class Adapter:
             cwd=str(data.get("cwd") or ""),
             model=_model_name(data.get("model")),
             transcript_path=str(data.get("transcript_path") or ""),
+            permission_mode=str(data.get("permission_mode") or ""),
         )
 
     def action(self, event: Event) -> str:
@@ -124,6 +127,11 @@ class Adapter:
         if event.kind in (PROMPT, POST_TOOL):
             return Output({"decision": "block", "reason": reason})
         return self.notify(event, reason)
+
+    def can_prompt(self, event: Event) -> bool:
+        """Whether the assistant can show its own permission prompt for this call. When it
+        can't, the person is asked in the conversation instead."""
+        return event.permission_mode != "bypassPermissions"
 
     def ask(self, event: Event, reason: str) -> Output:
         if event.kind == PRE_TOOL:
@@ -301,9 +309,13 @@ class Codex(Adapter):
             "account_organization": f"ChatGPT {plan}".strip() if plan else "",
         }
 
+    def can_prompt(self, event: Event) -> bool:
+        # Codex doesn't support "ask" yet and would let the call through; the person is
+        # asked in the conversation instead.
+        return False
+
     def ask(self, event: Event, reason: str) -> Output:
-        # Codex doesn't support "ask" yet and would let the call through; refuse instead.
-        return self.deny(event, f"{reason} (needs approval; ask IT)")
+        return self.deny(event, reason)
 
     def reply(self, event: Event, message: str) -> Output:
         return Output({"decision": "block", "reason": message, "systemMessage": message})
