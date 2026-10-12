@@ -607,7 +607,8 @@ def test_partial_last_line_is_left_for_the_next_read():
     assert parsed.resume_at == len(claude_line("msg_1", "done")) + 1
 
 
-def test_a_session_reports_tokens_incrementally_and_never_sends_text(calls, tmp_path):
+def test_a_session_reports_tokens_incrementally_and_never_sends_text(calls, tmp_path, monkeypatch):
+    monkeypatch.setenv("AEGIS_CAPTURE_CONTENT", "0")
     eng = connected("claude-code")
     transcript = tmp_path / "session.jsonl"
     transcript.write_text(claude_line("msg_1", "SECRET ANSWER ONE") + "\n")
@@ -633,6 +634,53 @@ def test_a_session_reports_tokens_incrementally_and_never_sends_text(calls, tmp_
     assert {r["key"] for r in telemetry} == {"aegk_test"}
     assert "SECRET" not in json.dumps(sent)
     assert State("claude-code").usage_cursor("s-9") == {}  # forgotten after the session
+
+
+@pytest.mark.parametrize("tool", ["claude-code", "codex"])
+def test_each_turn_reports_its_request_and_answer(calls, tool):
+    eng = connected(tool)
+    session = {"session_id": "s-7", "transcript_path": "/nope.jsonl"}
+    handle(tool, "UserPromptSubmit", {**session, "prompt": "Fix the flaky test"}, eng)
+    handle(tool, "Stop", {**session, "last_assistant_message": "Fixed: a race."}, eng)
+
+    (turn,) = [
+        e
+        for r in calls["requests"]
+        if r["path"] == "/v1/telemetry/events"
+        for e in r["body"]["events"]
+    ]
+    assert turn["type"] == "session.turn" and turn["session_id"] == "s-7"
+    assert (turn["input"], turn["output"]) == ("Fix the flaky test", "Fixed: a race.")
+    assert turn["occurred_at"].endswith("Z")
+
+
+def test_the_answer_falls_back_to_the_session_file(calls, tmp_path):
+    eng = connected("claude-code")
+    transcript = tmp_path / "session.jsonl"
+    lines = [
+        {"type": "user", "message": {"role": "user", "content": "Rename it"}},
+        {"type": "assistant", "message": {"content": [{"type": "text", "text": "Renamed."}]}},
+    ]
+    transcript.write_text("".join(json.dumps(line) + "\n" for line in lines))
+    session = {"session_id": "s-8", "transcript_path": str(transcript)}
+    handle("claude-code", "UserPromptSubmit", {**session, "prompt": "Rename it"}, eng)
+    handle("claude-code", "Stop", session, eng)
+
+    sent = [e for r in calls["requests"] for e in r["body"].get("events", [])]
+    assert [(e["input"], e["output"]) for e in sent if e["type"] == "session.turn"] == [
+        ("Rename it", "Renamed.")
+    ]
+
+
+def test_turn_text_stays_local_when_capture_is_off(calls, monkeypatch):
+    monkeypatch.setenv("AEGIS_CAPTURE_CONTENT", "off")
+    eng = connected("codex")
+    session = {"session_id": "s-6", "transcript_path": "/nope.jsonl"}
+    handle("codex", "UserPromptSubmit", {**session, "prompt": "SECRET plan"}, eng)
+    handle("codex", "Stop", {**session, "last_assistant_message": "SECRET done"}, eng)
+
+    telemetry = [r for r in calls["requests"] if r["path"] == "/v1/telemetry/events"]
+    assert not telemetry
 
 
 def test_failed_usage_reports_are_retried_from_the_same_place(calls, tmp_path):

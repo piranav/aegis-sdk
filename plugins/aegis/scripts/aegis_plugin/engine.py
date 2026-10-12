@@ -22,12 +22,14 @@ from aegis_plugin.adapters import (
     Output,
 )
 from aegis_plugin.client import ApiError, State, decode_code, request
-from aegis_plugin.confirm import DECLINED, call_key, last_agent_text
+from aegis_plugin.confirm import DECLINED, call_key, final_agent_text, last_agent_text
 from aegis_plugin.inventory import manifest_digest
 from aegis_plugin.usage import chunks, read_usage, safe_path, tracked_since
 
 # Hooks have short timeouts (Claude Code's SessionEnd allows a few seconds).
 USAGE_TIME_BUDGET_SECONDS = 1.5
+# Request and answer previews, as on the dashboard. AEGIS_CAPTURE_CONTENT=0 sends neither.
+PREVIEW_CHARS = 4000
 
 # "aegis connect <code>", "aegis status", "aegis disconnect", typed as a message. The
 # plugin answers these itself, so connection codes never reach the model provider.
@@ -164,7 +166,7 @@ class Engine:
             return a.allow(event)
 
         if event.kind == STOP:
-            self.report_usage(creds, event)
+            self.report_usage(creds, event, turn=self.turn(event))
             return a.allow(event)
 
         if event.kind == SESSION_END:
@@ -180,6 +182,7 @@ class Engine:
             # The person's latest message may answer a question the agent asked for Aegis.
             store = self.state.confirmations(event.session_id)
             store["_prompt"] = event.prompt[:4000]
+            store["_prompt_at"] = utc_now()
             self.state.save_confirmations(event.session_id, store)
             body = {
                 "agent_name": a.tool,
@@ -227,8 +230,31 @@ class Engine:
         except Exception:  # noqa: BLE001 - the inventory must never hold up a session
             return
 
+    def turn(self, event: Event) -> dict | None:
+        """The finished turn's request and answer, shown with the session in Aegis."""
+        if not capture_content() or not event.session_id:
+            return None
+        store = self.state.confirmations(event.session_id)
+        request = str(store.get("_prompt") or "")
+        answer = event.last_message or final_agent_text(event.transcript_path) or ""
+        if not request and not answer:
+            return None
+        return {
+            "type": "session.turn",
+            "session_id": event.session_id,
+            "occurred_at": store.get("_prompt_at") or utc_now(),
+            "input": request[:PREVIEW_CHARS] or None,
+            "output": answer[:PREVIEW_CHARS] or None,
+        }
+
     def report_usage(
-        self, creds: dict, event: Event, *, opening: bool = False, final: bool = False
+        self,
+        creds: dict,
+        event: Event,
+        *,
+        opening: bool = False,
+        final: bool = False,
+        turn: dict | None = None,
     ) -> None:
         """Send model calls the assistant recorded since the last report. Best effort.
 
@@ -238,7 +264,7 @@ class Engine:
         fmt = self.adapter.transcript
         if fmt is None or not event.session_id:
             return
-        now = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+        now = utc_now()
         events = []
         if opening:
             events.append(
@@ -276,6 +302,8 @@ class Engine:
                 cursor = {"offset": step.offset, "model": step.model, **step.links}
                 if step.at_end:
                     break
+        if turn:
+            events.append(turn)
         if final:
             events.append(
                 {"type": "session.end", "session_id": event.session_id, "occurred_at": now}
@@ -445,6 +473,20 @@ class Engine:
         if blocking and event.kind in (PRE_TOOL, PROMPT):
             return a.deny(event, message)
         return a.notify(event, message)
+
+
+def utc_now() -> str:
+    return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+
+
+def capture_content() -> bool:
+    """Whether prompts and answers are sent; set AEGIS_CAPTURE_CONTENT=0 to keep them local."""
+    return os.environ.get("AEGIS_CAPTURE_CONTENT", "1").strip().lower() not in (
+        "0",
+        "false",
+        "no",
+        "off",
+    )
 
 
 def explain(result: dict) -> str:

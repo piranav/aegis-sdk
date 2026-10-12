@@ -10,8 +10,9 @@ Each event also says which tool calls the response made and which tool results i
 input read (by id, name, and estimated size), so Aegis can attribute token spend to the
 tools, MCP servers, skills, and subagents that drove it.
 
-Only model names, token counts, tool names, sizes, ids, and timestamps leave the
-machine: never prompt, response, tool argument, or tool result text. Reads are
+Usage events carry only model names, token counts, tool names, sizes, ids, and
+timestamps: never prompt, response, tool argument, or tool result text. (Each turn's
+request and final answer are sent separately, unless AEGIS_CAPTURE_CONTENT=0.) Reads are
 incremental (a byte offset per session, plus the few tool links still open), and the
 gateway deduplicates by response id, so a re-sent response is never counted twice.
 """

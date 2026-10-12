@@ -41,6 +41,8 @@ class Event:
     transcript_path: str = ""
     # The assistant's permission mode (Claude Code), e.g. "default" or "bypassPermissions".
     permission_mode: str = ""
+    # The assistant's final message of the turn (Stop), when the assistant provides it.
+    last_message: str = ""
 
 
 @dataclass
@@ -79,6 +81,7 @@ class Adapter:
             model=_model_name(data.get("model")),
             transcript_path=str(data.get("transcript_path") or ""),
             permission_mode=str(data.get("permission_mode") or ""),
+            last_message=str(data.get("last_assistant_message") or ""),
         )
 
     def action(self, event: Event) -> str:
