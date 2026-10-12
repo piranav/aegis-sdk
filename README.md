@@ -177,8 +177,9 @@ with telemetry.session(input=prompt, customer_id="acme") as session:
     session.record_llm_call(
         model=response.model,
         call_id=response.id,
-        usage=TokenUsage(input_tokens=response.usage.input_tokens,
-                         output_tokens=response.usage.output_tokens),
+        usage=TokenUsage(
+            input_tokens=response.usage.input_tokens, output_tokens=response.usage.output_tokens
+        ),
     )
 ```
 
@@ -200,8 +201,8 @@ Aegis does not detect who a run is for; your code declares it. Wrap each run in
 
 ```python
 with bind_session(
-    customer_id=account.id,          # who the work is for: drives "usage by customer"
-    end_user_id=user.id,             # the person inside that customer, if any
+    customer_id=account.id,  # who the work is for: drives "usage by customer"
+    end_user_id=user.id,  # the person inside that customer, if any
     attributes={"plan": "enterprise", "region": "eu"},  # extra dimensions to filter on
 ):
     result = await Runner.run(agent, prompt, hooks=hooks)
@@ -264,10 +265,12 @@ async for message in provider.instrument(client.receive_response()):
 ```python
 from aegis_sdk import Component
 
-inventory.report_manifest([
-    Component.model("gpt-4.1-mini", provider="openai"),
-    Component.mcp_server("github", transport="http", locator=url, tools=["create_issue"]),
-])
+inventory.report_manifest(
+    [
+        Component.model("gpt-4.1-mini", provider="openai"),
+        Component.mcp_server("github", transport="http", locator=url, tools=["create_issue"]),
+    ]
+)
 inventory.record_usage([("mcp_server", "github"), ("tool", "create_issue")])
 ```
 
