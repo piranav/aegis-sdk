@@ -348,24 +348,30 @@ def _token_usage(usage: Any) -> TokenUsage:
 
 
 def _user_input_text(turn_input: list[Any] | None) -> str | None:
-    """The user's text from the run input, which is either a string or input items."""
+    """The user's latest message in the run input, which is either a string or input
+    items. A multi-turn run passes the whole conversation; earlier turns aren't this
+    request."""
 
     if not turn_input:
         return None
-    texts = []
-    for item in turn_input:
+    for item in reversed(turn_input):
         if not isinstance(item, dict) or item.get("role") != "user":
             continue
         content = item.get("content")
         if isinstance(content, str):
-            texts.append(content)
+            texts = [content]
         elif isinstance(content, list):
-            texts.extend(
+            texts = [
                 part.get("text", "")
                 for part in content
                 if isinstance(part, dict) and part.get("type") == "input_text"
-            )
-    return "\n".join(text for text in texts if text) or None
+            ]
+        else:
+            continue
+        text = "\n".join(text for text in texts if text)
+        if text:
+            return text
+    return None
 
 
 def _now() -> str:

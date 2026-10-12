@@ -249,3 +249,16 @@ async def test_claude_prompt_hook_opens_the_turn_with_the_prompt() -> None:
     assert output == {}
     (start,) = exporter.events
     assert (start.session_id, start.input, start.customer_id) == ("sess-9", "Hi", "acme")
+
+
+def test_openai_request_is_the_latest_user_message_of_a_multi_turn_run():
+    pytest.importorskip("agents")
+    from aegis_sdk.integrations.openai_agents.hooks import _user_input_text
+
+    history = [
+        {"role": "user", "content": "Where is order 7?"},
+        {"role": "assistant", "content": "It ships tomorrow."},
+        {"role": "user", "content": [{"type": "input_text", "text": "And order 8?"}]},
+    ]
+
+    assert _user_input_text(history) == "And order 8?"
