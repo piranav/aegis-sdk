@@ -291,3 +291,59 @@ def _gateway_decision_payload(
         "total_ms": 2.0,
         "audit_id": audit_id,
     }
+
+
+@pytest.mark.asyncio
+async def test_claude_escalation_asks_the_user_and_their_next_prompt_answers() -> None:
+    import json
+
+    state = {"approved": False}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.read() or b"{}")
+        if request.url.path.endswith("/reply"):
+            state["approved"] = body["message"] == "yes please"
+            return httpx.Response(200, json={"id": "conf-1", "status": "approved"})
+        if body.get("confirmation_id") == "conf-1" and state["approved"]:
+            return httpx.Response(200, json=_gateway_decision_payload(audit_id="audit-2"))
+        held = _gateway_decision_payload(
+            audit_id="audit-1", allowed=False, decision="escalate", violations=["Needs OK"]
+        )
+        held["confirmation"] = {
+            "id": "conf-1",
+            "question": "Delete the records?",
+            "agent_instruction": "[AEGIS] CONFIRMATION NEEDED: ask the user first.",
+        }
+        return httpx.Response(200, json=held)
+
+    hooks = AegisClaudeGatewayHooks(
+        AegisGatewayClient("http://aegis.test", "k", transport=httpx.MockTransport(handler))
+    )
+    await hooks.user_prompt_submit({"session_id": "session-1", "prompt": "clean up"}, None, None)
+    held = await hooks.pre_tool_use(_pre_input(tool_name="delete_records"), "tool-use-1", None)
+    reason = held["hookSpecificOutput"]["permissionDecisionReason"]
+    assert "CONFIRMATION NEEDED" in reason
+
+    await hooks.user_prompt_submit({"session_id": "session-1", "prompt": "yes please"}, None, None)
+    allowed = await hooks.pre_tool_use(_pre_input(tool_name="delete_records"), "tool-use-2", None)
+    assert allowed == {}
+
+
+def test_the_agents_last_question_is_read_from_the_transcript(tmp_path) -> None:
+    import json
+
+    from aegis_sdk.integrations.claude_agent.hooks import last_agent_text
+
+    transcript = tmp_path / "session.jsonl"
+    entries = [
+        {"type": "user", "message": {"role": "user", "content": "clean up old records"}},
+        {
+            "type": "assistant",
+            "message": {"content": [{"type": "text", "text": "Delete records 1-9. OK?"}]},
+        },
+        {"type": "user", "message": {"role": "user", "content": "yes"}},
+        {"type": "assistant", "message": {"content": [{"type": "tool_use", "name": "rm"}]}},
+    ]
+    transcript.write_text("\n".join(json.dumps(e) for e in entries))
+    assert last_agent_text(str(transcript)) == "Delete records 1-9. OK?"
+    assert last_agent_text(None) is None

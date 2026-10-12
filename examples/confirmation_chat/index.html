@@ -1,0 +1,45 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Support chat</title>
+<style>
+  :root { --bg:#f6f7f9; --card:#fff; --ink:#1b1f24; --muted:#667085; --me:#2f6f5e; --line:#e4e7ec; }
+  * { box-sizing:border-box } body { margin:0; font:15px/1.5 system-ui,sans-serif; background:var(--bg); color:var(--ink) }
+  main { max-width:720px; margin:0 auto; padding:24px 16px; display:flex; flex-direction:column; height:100vh }
+  header h1 { font-size:18px; margin:0 } header p { margin:4px 0 16px; color:var(--muted); font-size:13px }
+  #log { flex:1; overflow:auto; display:flex; flex-direction:column; gap:10px; padding:4px }
+  .msg { max-width:80%; padding:10px 14px; border-radius:14px; background:var(--card); border:1px solid var(--line); white-space:pre-wrap }
+  .me { align-self:flex-end; background:var(--me); color:#fff; border-color:var(--me) }
+  .who { font-size:11px; color:var(--muted); margin-bottom:2px } .me .who { color:#d6eee7 }
+  form { display:flex; gap:8px; padding-top:12px } input { flex:1; padding:12px; border:1px solid var(--line); border-radius:10px; font:inherit }
+  button { padding:0 18px; border:0; border-radius:10px; background:var(--me); color:#fff; font:inherit; cursor:pointer }
+  #records { font-size:12px; color:var(--muted); margin-top:8px }
+</style>
+</head>
+<body>
+<main>
+  <header><h1>Acme support assistant</h1><p>An OpenAI Agents SDK agent governed by Aegis. Customer records: <span id="records">C-1001 Ada Lovelace, C-1002 Grace Hopper</span></p></header>
+  <div id="log" aria-live="polite"></div>
+  <form id="form"><input id="text" autocomplete="off" placeholder="Message the assistant" aria-label="Message"><button>Send</button></form>
+</main>
+<script>
+  const log = document.getElementById("log");
+  function add(who, text) {
+    const el = document.createElement("div"); el.className = "msg" + (who === "You" ? " me" : "");
+    el.innerHTML = `<div class="who">${who}</div>`; el.append(text); log.append(el); log.scrollTop = log.scrollHeight;
+  }
+  document.getElementById("form").addEventListener("submit", async e => {
+    e.preventDefault(); const input = document.getElementById("text"); const text = input.value.trim(); if (!text || input.disabled) return;
+    input.value = ""; add("You", text); input.disabled = true; input.placeholder = "Assistant is working…";
+    let data = {};
+    try {
+      const r = await fetch("/chat", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ text }) });
+      data = await r.json();
+    } finally { input.disabled = false; input.placeholder = "Message the assistant"; input.focus(); }
+    add("Assistant", data.reply ?? data.detail ?? "Error");
+    document.getElementById("records").textContent = Object.entries(data.customers ?? {}).map(([k, v]) => `${k} ${v}`).join(", ") || "none";
+  });
+</script>
+</body>
+</html>

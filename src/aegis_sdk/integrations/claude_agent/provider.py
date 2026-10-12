@@ -82,15 +82,13 @@ class AegisClaudeGatewayProvider:
 
         merged_hooks["PreToolUse"] = [pre_matcher, *merged_hooks.get("PreToolUse", [])]
         merged_hooks["PostToolUse"] = [post_matcher, *merged_hooks.get("PostToolUse", [])]
-        if self.hooks.telemetry_observer is not None:
-            # Prompt hooks ignore the tool-name matcher; they fire for every turn.
-            prompt_matcher = HookMatcher(
-                hooks=[self.hooks.user_prompt_submit], timeout=self.timeout
-            )
-            merged_hooks["UserPromptSubmit"] = [
-                prompt_matcher,
-                *merged_hooks.get("UserPromptSubmit", []),
-            ]
+        # Every turn's prompt is the user's possible answer to a confirmation question, and
+        # opens the turn's telemetry session. Prompt hooks ignore the tool-name matcher.
+        prompt_matcher = HookMatcher(hooks=[self.hooks.user_prompt_submit], timeout=self.timeout)
+        merged_hooks["UserPromptSubmit"] = [
+            prompt_matcher,
+            *merged_hooks.get("UserPromptSubmit", []),
+        ]
 
         return ClaudeAgentOptions(hooks=merged_hooks, **claude_options)
 

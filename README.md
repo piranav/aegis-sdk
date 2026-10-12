@@ -109,6 +109,30 @@ executed and cannot undo side effects. Use one provider per runtime/session and
 retain default SDK permission controls. Do not override governance hook outputs
 with permissive custom hooks.
 
+## Confirming actions with the user
+
+When an organization rule holds a tool call for review (`then escalate`), the OpenAI and
+Claude integrations ask the person using the agent, in the conversation, with no extra code:
+
+1. The call is not run. The agent is told to ask its user a plain-language question, for
+   example "Deleting a customer record permanently removes their data. Should I go ahead?"
+2. The user answers in the chat. The integration relays their next message (never the
+   model's words) to the gateway.
+3. A model on the Aegis side reads the reply in context ("No problem, go ahead" is a yes;
+   "Yes, but the other one" is not). A yes lets the agent's retry of the exact same call
+   (same tool and arguments) run once; anything else keeps it on hold. Activity records the
+   question, the reply, how it was read, and who confirmed it (the `user_id` your
+   `user_id_resolver` returns). Pending questions are stored by the gateway, so an Aegis
+   restart doesn't lose them.
+
+If the agent asks in its own words before calling the tool, its question goes with the
+user's answer, so the user isn't asked twice. That counts only if the question named the
+action (for example which record); a vague question gets Aegis's own question instead.
+
+Clients can't approve calls themselves: `has_human_approval` is ignored unless it comes
+from a confirmation the user gave. Rules that block still block. See
+`examples/confirmation_chat` for a runnable chat.
+
 ## Session telemetry
 
 Aegis can show each agent run as a session: the request, every model call with its

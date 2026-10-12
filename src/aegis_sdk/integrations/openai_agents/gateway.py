@@ -16,6 +16,12 @@ from agents import (
 )
 
 from aegis_sdk.client import AegisGatewayClient, AegisGatewayError, GatewayEvaluationResponse
+from aegis_sdk.confirmations import (
+    DECLINED_MESSAGE,
+    ConfirmationTracker,
+    latest_user_message,
+    previous_agent_message,
+)
 from aegis_sdk.integrations.openai_agents.run_scope import run_scope
 from aegis_sdk.types import ActionContext
 
@@ -30,13 +36,32 @@ def make_aegis_gateway_guardrail(
     *,
     user_id_resolver: UserIdResolver | None = None,
 ):
-    """Create an OpenAI tool input guardrail that calls ``/v1/evaluate``."""
+    """Create an OpenAI tool input guardrail that calls ``/v1/evaluate``.
+
+    When a rule holds a call for the user's confirmation, the agent is told to ask its user;
+    the user's next message is relayed as their answer, and a clear yes lets the agent's
+    retry of the same call run once.
+    """
+
+    confirmations = ConfirmationTracker()
 
     @tool_input_guardrail(name="aegis-gateway-governance")
     async def aegis_gateway_check(data: ToolInputGuardrailData) -> ToolGuardrailFunctionOutput:
         ctx = _build_action_context(data, user_id_resolver)
+        turn_input = getattr(data.context, "turn_input", None)
+        user_message = latest_user_message(turn_input)
         try:
-            decision = await asyncio.to_thread(client.evaluate, ctx)
+            outcome, confirmation_id = await asyncio.to_thread(
+                confirmations.resolve, client, ctx, user_message
+            )
+            if outcome == "declined":
+                return ToolGuardrailFunctionOutput.reject_content(
+                    message=DECLINED_MESSAGE,
+                    output_info={"decision": "escalate", "phase": "input", "declined": True},
+                )
+            decision = await asyncio.to_thread(
+                client.evaluate, ctx, confirmation_id=confirmation_id
+            )
         except AegisGatewayError as exc:
             return ToolGuardrailFunctionOutput.reject_content(
                 message=f"[AEGIS] DENY: {exc}",
@@ -47,6 +72,36 @@ def make_aegis_gateway_guardrail(
         info = _decision_info(decision)
         if decision.allowed:
             return ToolGuardrailFunctionOutput.allow(output_info=info)
+        if decision.confirmation is not None and outcome == "none":
+            # The agent may have asked in its own words and the user answered already.
+            approved_id = await asyncio.to_thread(
+                confirmations.answered_already,
+                client,
+                ctx,
+                decision.confirmation,
+                user_message,
+                previous_agent_message(turn_input),
+            )
+            if approved_id is not None:
+                try:
+                    decision = await asyncio.to_thread(
+                        client.evaluate, ctx, confirmation_id=approved_id
+                    )
+                except AegisGatewayError as exc:
+                    return ToolGuardrailFunctionOutput.reject_content(
+                        message=f"[AEGIS] DENY: {exc}",
+                        output_info={"decision": "deny", "phase": "input", "error": str(exc)},
+                    )
+                _store_input_state(data.context, ctx, decision)
+                info = _decision_info(decision)
+                if decision.allowed:
+                    return ToolGuardrailFunctionOutput.allow(output_info=info)
+        if decision.confirmation is not None:
+            confirmations.remember(ctx, decision.confirmation, user_message)
+            info["confirmation_id"] = decision.confirmation.id
+            return ToolGuardrailFunctionOutput.reject_content(
+                message=decision.confirmation.agent_instruction, output_info=info
+            )
 
         violation_summary = "; ".join(decision.violations[:3]) or decision.decision.value
         return ToolGuardrailFunctionOutput.reject_content(
