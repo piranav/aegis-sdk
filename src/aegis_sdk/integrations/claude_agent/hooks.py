@@ -11,6 +11,9 @@ from datetime import UTC, datetime
 from typing import Any
 
 from aegis_sdk.client import AegisGatewayClient, AegisGatewayError, GatewayEvaluationResponse
+from aegis_sdk.confirmations import DECLINED_MESSAGE, ConfirmationTracker
+from aegis_sdk.integrations.claude_agent.telemetry import ClaudeTelemetryObserver
+from aegis_sdk.telemetry import AegisTelemetry
 from aegis_sdk.types import ActionContext, GovernanceDecision
 
 logger = logging.getLogger(__name__)
@@ -40,11 +43,31 @@ class AegisClaudeGatewayHooks:
         client: AegisGatewayClient,
         *,
         user_id_resolver: UserIdResolver | None = None,
+        telemetry: AegisTelemetry | None = None,
     ) -> None:
         self.client = client
         self.user_id_resolver = user_id_resolver
+        self.telemetry_observer = ClaudeTelemetryObserver(telemetry) if telemetry else None
         self._tool_uses: dict[tuple[str, str], StoredGatewayToolUse] = {}
+        # The user's latest prompt per session: their answer to any confirmation question.
+        self._prompts: dict[str, str] = {}
+        self.confirmations = ConfirmationTracker()
         self.trace: list[dict[str, Any]] = []
+
+    async def user_prompt_submit(
+        self,
+        input_data: dict[str, Any],
+        tool_use_id: str | None,
+        context: ClaudeHookContext,
+    ) -> HookOutput:
+        """Open the session for this turn with the user's prompt as its input."""
+
+        session_id = input_data.get("session_id")
+        if isinstance(input_data.get("prompt"), str):
+            self._prompts[str(session_id or _UNKNOWN_SESSION)] = input_data["prompt"]
+        if self.telemetry_observer is not None and session_id:
+            self.telemetry_observer.start_session(session_id, prompt=input_data.get("prompt"))
+        return {}
 
     async def pre_tool_use(
         self,
@@ -56,8 +79,16 @@ class AegisClaudeGatewayHooks:
 
         ctx = _build_action_context(input_data, tool_use_id, context, self.user_id_resolver)
         key = _state_key(input_data, tool_use_id)
+        prompt = self._prompts.get(key[0])
         try:
-            decision = await asyncio.to_thread(self.client.evaluate, ctx)
+            outcome, confirmation_id = await asyncio.to_thread(
+                self.confirmations.resolve, self.client, ctx, prompt
+            )
+            if outcome == "declined":
+                return _pre_tool_violation_output(DECLINED_MESSAGE)
+            decision = await asyncio.to_thread(
+                self.client.evaluate, ctx, confirmation_id=confirmation_id
+            )
         except AegisGatewayError as exc:
             reason = f"[AEGIS] DENY: {exc}"
             self._append_trace(
@@ -100,6 +131,31 @@ class AegisClaudeGatewayHooks:
 
         if decision.allowed:
             return {}
+        if decision.confirmation is not None and outcome == "none":
+            # The agent may have asked in its own words and the user answered already.
+            approved_id = await asyncio.to_thread(
+                self.confirmations.answered_already,
+                self.client,
+                ctx,
+                decision.confirmation,
+                prompt,
+                last_agent_text(input_data.get("transcript_path")),
+            )
+            if approved_id is not None:
+                try:
+                    retried = await asyncio.to_thread(
+                        self.client.evaluate, ctx, confirmation_id=approved_id
+                    )
+                except AegisGatewayError as exc:
+                    return _pre_tool_violation_output(f"[AEGIS] DENY: {exc}")
+                if retried.allowed:
+                    self._tool_uses[key] = StoredGatewayToolUse(ctx, retried.audit_id, retried)
+                    return {}
+                decision = retried
+        if decision.confirmation is not None:
+            # Ask the user in the conversation; their next prompt is relayed as the answer.
+            self.confirmations.remember(ctx, decision.confirmation, prompt)
+            return _pre_tool_violation_output(decision.confirmation.agent_instruction)
 
         return _pre_tool_violation_output(_format_reason(decision))
 
@@ -211,10 +267,11 @@ def make_aegis_claude_gateway_hooks(
     client: AegisGatewayClient,
     *,
     user_id_resolver: UserIdResolver | None = None,
+    telemetry: AegisTelemetry | None = None,
 ) -> AegisClaudeGatewayHooks:
     """Create stateful Claude hook callbacks for the Aegis API gateway."""
 
-    return AegisClaudeGatewayHooks(client, user_id_resolver=user_id_resolver)
+    return AegisClaudeGatewayHooks(client, user_id_resolver=user_id_resolver, telemetry=telemetry)
 
 
 def _build_action_context(
@@ -288,6 +345,44 @@ def _post_tool_violation_output(reason: str) -> HookOutput:
             ),
         },
     }
+
+
+def last_agent_text(transcript_path: str | None) -> str | None:
+    """The agent's last message before the user's latest prompt, from the session
+    transcript (JSON lines): a question it may have asked before calling a tool."""
+    if not transcript_path:
+        return None
+    try:
+        with open(transcript_path, encoding="utf-8") as handle:
+            lines = handle.readlines()[-400:]
+    except OSError:
+        return None
+    last_agent, before_prompt = None, None
+    for line in lines:
+        try:
+            entry = json.loads(line)
+        except ValueError:
+            continue
+        message = entry.get("message") if isinstance(entry, dict) else None
+        if not isinstance(message, dict):
+            continue
+        content = message.get("content")
+        texts = (
+            [content]
+            if isinstance(content, str)
+            else [
+                part.get("text")
+                for part in content or []
+                if isinstance(part, dict) and part.get("type") == "text" and part.get("text")
+            ]
+        )
+        if not texts:
+            continue  # Tool calls and tool results, not conversation.
+        if entry.get("type") == "assistant":
+            last_agent = "\n".join(texts)
+        elif entry.get("type") == "user":
+            before_prompt = last_agent
+    return before_prompt
 
 
 def _safe_text(value: Any) -> str:

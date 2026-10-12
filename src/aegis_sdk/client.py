@@ -3,34 +3,32 @@
 from __future__ import annotations
 
 import os
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
+from datetime import datetime
 from typing import Any
 
 import httpx
-from pydantic import Field
+from pydantic import BaseModel, Field
 
+from aegis_sdk.errors import AegisGatewayError
+from aegis_sdk.telemetry.events import TelemetryIngestResult
 from aegis_sdk.types import ActionContext, GovernanceDecision
+
+
+class GatewayConfirmation(BaseModel):
+    """A question the agent must ask its user before an escalated call can run."""
+
+    id: str
+    question: str
+    agent_instruction: str
+    expires_at: datetime | None = None
 
 
 class GatewayEvaluationResponse(GovernanceDecision):
     """Decision response returned by the API gateway."""
 
     audit_id: str = Field(description="Audit id used to correlate result evaluation")
-
-
-class AegisGatewayError(RuntimeError):
-    """Raised when the Aegis gateway rejects or cannot process a request."""
-
-    def __init__(
-        self,
-        message: str,
-        *,
-        status_code: int | None = None,
-        response: httpx.Response | None = None,
-    ) -> None:
-        self.status_code = status_code
-        self.response = response
-        super().__init__(message)
+    confirmation: GatewayConfirmation | None = None
 
 
 class AegisGatewayClient:
@@ -101,10 +99,20 @@ class AegisGatewayClient:
         if self._owns_client:
             self._client.close()
 
-    def evaluate(self, action: ActionContext | Mapping[str, Any]) -> GatewayEvaluationResponse:
-        """Evaluate an agent tool call through ``POST /v1/evaluate``."""
+    def evaluate(
+        self,
+        action: ActionContext | Mapping[str, Any],
+        *,
+        confirmation_id: str | None = None,
+    ) -> GatewayEvaluationResponse:
+        """Evaluate an agent tool call through ``POST /v1/evaluate``.
+
+        ``confirmation_id`` retries a call the user confirmed in the conversation.
+        """
 
         payload = _action_payload(action)
+        if confirmation_id:
+            payload["confirmation_id"] = confirmation_id
         response = self._request("POST", "/v1/evaluate", json=payload)
         return GatewayEvaluationResponse.model_validate(response.json())
 
@@ -126,6 +134,50 @@ class AegisGatewayClient:
             },
         )
         return GatewayEvaluationResponse.model_validate(response.json())
+
+    def reply_to_confirmation(
+        self,
+        confirmation_id: str,
+        message: str,
+        *,
+        user_id: str | None = None,
+        agent_question: str | None = None,
+        source: str = "conversation",
+    ) -> dict[str, Any]:
+        """Relay the user's answer to a confirmation question through
+        ``POST /v1/confirmations/{id}/reply``. Integrations call this, not agents.
+
+        ``agent_question`` is the agent's own wording when it asked before calling the tool.
+        """
+
+        body: dict[str, Any] = {"message": message, "user_id": user_id, "source": source}
+        if agent_question:
+            body["agent_question"] = agent_question
+        return self._request(
+            "POST", f"/v1/confirmations/{confirmation_id}/reply", json=body
+        ).json()
+
+    def send_telemetry(self, events: Sequence[Mapping[str, Any]]) -> TelemetryIngestResult:
+        """Report a batch of telemetry events through ``POST /v1/telemetry/events``.
+
+        Most callers use ``AegisTelemetry``, which batches and sends in the background.
+        """
+
+        response = self._request("POST", "/v1/telemetry/events", json={"events": list(events)})
+        return TelemetryIngestResult.model_validate(response.json())
+
+    def put_inventory_manifest(self, manifest: Mapping[str, Any]) -> dict[str, Any]:
+        """Replace this agent's declared components through ``PUT /v1/inventory/manifest``.
+
+        Most callers use ``AegisInventory``, which sends only when the manifest changes.
+        """
+
+        return self._request("PUT", "/v1/inventory/manifest", json=dict(manifest)).json()
+
+    def send_inventory_usage(self, usages: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
+        """Report component usage through ``POST /v1/inventory/usage``."""
+
+        return self._request("POST", "/v1/inventory/usage", json={"usages": list(usages)}).json()
 
     def _request(self, method: str, path: str, **kwargs: Any) -> httpx.Response:
         headers = kwargs.pop("headers", {})

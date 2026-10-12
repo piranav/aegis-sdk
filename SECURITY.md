@@ -13,5 +13,10 @@ Framework hooks and optional traces can retain arguments and results. Protect
 logs and memory containing them. Attach guardrails to each governed function tool;
 SDK function-tool guardrails do not cover provider-hosted tools.
 
+Session telemetry sends prompt and answer previews unless `capture_content=False`.
+Customer attribution (`customer_id`, `end_user_id`, `attributes`) is self-reported
+by your runtime and used only for reporting; set it from authenticated application
+context and use opaque identifiers rather than personal data.
+
 Report suspected issues privately to the repository owner. Do not include active
 credentials or sensitive action/result content in public issues.
