@@ -50,6 +50,28 @@ def last_agent_text(transcript_path: str) -> str | None:
     return before_prompt
 
 
+def final_agent_text(transcript_path: str) -> str | None:
+    """The agent's last message in the session file: its answer once a turn is done."""
+    if not transcript_path:
+        return None
+    try:
+        with open(transcript_path, encoding="utf-8") as handle:
+            lines = handle.readlines()[-400:]
+    except OSError:
+        return None
+    for raw in reversed(lines):
+        try:
+            entry = json.loads(raw)
+        except ValueError:
+            continue
+        role, texts = _message(entry)
+        if role == "assistant" and texts:
+            return "\n".join(texts)
+        if role == "user" and texts and not texts[0].lstrip().startswith("<"):
+            return None  # The person spoke last: this turn has no answer.
+    return None
+
+
 def _message(entry) -> tuple[str | None, list[str]]:
     if not isinstance(entry, dict):
         return None, []

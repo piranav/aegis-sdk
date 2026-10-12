@@ -48,7 +48,11 @@ working model. From a terminal: `python3 scripts/aegis.py connect <code> --tool 
 | Prompt | Answers `aegis ...` commands; evaluates other prompts and blocks denied ones |
 | Before a tool call | Allow, deny, or ask the person when a rule needs their OK (below) |
 | After a tool call | Evaluates the result against output rules |
+| End of a turn | Reports the turn's model usage, and its request and final answer (first 4,000 characters each) so the session shows them |
 | Session end | Reports the session ended |
+
+To keep prompts and answers on the machine, set `AEGIS_CAPTURE_CONTENT=0` in the
+environment the assistant runs in. Sessions then show token usage and tool calls only.
 
 When a rule needs the person's OK before a call runs, Claude Code shows its own
 permission prompt with Aegis's question, and the plugin tells Aegis when the person
