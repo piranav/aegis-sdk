@@ -46,9 +46,17 @@ working model. From a terminal: `python3 scripts/aegis.py connect <code> --tool 
 | --- | --- |
 | Session start | Reports liveness and, when it changed, the assistant's inventory; reminds the person to connect if they haven't |
 | Prompt | Answers `aegis ...` commands; evaluates other prompts and blocks denied ones |
-| Before a tool call | Allow, deny, or ask the person (Codex can't ask yet, so it refuses) |
+| Before a tool call | Allow, deny, or ask the person when a rule needs their OK (below) |
 | After a tool call | Evaluates the result against output rules |
 | Session end | Reports the session ended |
+
+When a rule needs the person's OK before a call runs, Claude Code shows its own
+permission prompt with Aegis's question, and the plugin tells Aegis when the person
+allowed the call. Codex can't show that prompt yet, and Claude Code skips it when
+permission prompts are turned off, so there the agent asks in the conversation and the
+person's next message is sent to Aegis as their answer. A model on the Aegis side reads
+the answer in context; a yes lets that exact call run once. If the agent already asked in
+its own words, its question goes with the answer, so the person isn't asked twice.
 
 Each tool call is sent with its canonical action (`file.read`, `file.write`,
 `shell.exec`, `mcp.call`, `web.fetch`) and the files it touches, so one rule can hold

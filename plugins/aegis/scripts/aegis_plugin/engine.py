@@ -22,6 +22,7 @@ from aegis_plugin.adapters import (
     Output,
 )
 from aegis_plugin.client import ApiError, State, decode_code, request
+from aegis_plugin.confirm import DECLINED, call_key, last_agent_text
 from aegis_plugin.inventory import manifest_digest
 from aegis_plugin.usage import chunks, read_usage, safe_path, tracked_since
 
@@ -176,6 +177,10 @@ class Engine:
             return a.allow(event)
 
         if event.kind == PROMPT:
+            # The person's latest message may answer a question the agent asked for Aegis.
+            store = self.state.confirmations(event.session_id)
+            store["_prompt"] = event.prompt[:4000]
+            self.state.save_confirmations(event.session_id, store)
             body = {
                 "agent_name": a.tool,
                 "tool_name": "UserPromptSubmit",
@@ -186,19 +191,10 @@ class Engine:
             return self.decide(event, creds, "/v1/evaluate", body)
 
         if event.kind == PRE_TOOL:
-            facts = {"tool": a.tool, "action": a.action(event), "paths": a.paths(event)}
-            commands = a.commands(event)
-            if commands:
-                facts["commands"] = commands
-            body = {
-                "agent_name": a.tool,
-                "tool_name": event.tool_name or "unknown",
-                "tool_args": {**event.tool_input, "_aegis": facts},
-                "session_id": event.session_id,
-            }
-            return self.decide(event, creds, "/v1/evaluate", body)
+            return self.pre_tool(event, creds)
 
         if event.kind == POST_TOOL:
+            self.prompt_answered(event, creds)
             audit_id = self.state.recall_audit(event.session_id, event.tool_use_id)
             if not audit_id:
                 return a.allow(event)
@@ -298,11 +294,118 @@ class Engine:
                 event.session_id, {"offset": batch.offset, "model": batch.model, **batch.links}
             )
 
+    def tool_body(self, event: Event) -> dict:
+        a = self.adapter
+        facts = {"tool": a.tool, "action": a.action(event), "paths": a.paths(event)}
+        commands = a.commands(event)
+        if commands:
+            facts["commands"] = commands
+        return {
+            "agent_name": a.tool,
+            "tool_name": event.tool_name or "unknown",
+            "tool_args": {**event.tool_input, "_aegis": facts},
+            "session_id": event.session_id,
+        }
+
+    # -------------------------------------------------------- confirmations
+
+    def pre_tool(self, event: Event, creds: dict) -> Output:
+        """Evaluate a tool call. When a rule holds it for the person's OK: show the
+        assistant's permission prompt if it has one, else have the agent ask in the chat
+        and relay the person's next message as their answer."""
+        a, sid = self.adapter, event.session_id
+        store = self.state.confirmations(sid)
+        latest = store.get("_prompt")
+        key = call_key(event.tool_name, event.tool_input)
+        pending = store.get(key)
+        body = self.tool_body(event)
+        if pending and latest and latest != pending.get("asked_after"):
+            status = self.answer(creds, pending["id"], latest)
+            if status == "approved":
+                body["confirmation_id"] = store.pop(key)["id"]
+            elif status == "declined":
+                store.pop(key)
+                self.state.save_confirmations(sid, store)
+                return a.deny(event, DECLINED)
+            else:
+                pending["asked_after"] = latest  # Not a clear answer: wait for the next.
+            self.state.save_confirmations(sid, store)
+        try:
+            result = request(creds["api_url"], "/v1/evaluate", body, creds["api_key"])
+        except ApiError as exc:
+            return self.unavailable(event, creds, exc)
+        confirmation = result.get("confirmation")
+        if result.get("decision") != "escalate" or not confirmation:
+            return self.verdict(event, creds, result)
+        if a.can_prompt(event) and event.tool_use_id:
+            store[f"use:{event.tool_use_id}"] = {"id": confirmation["id"]}
+            self.state.save_confirmations(sid, store)
+            return a.ask(event, f"[Aegis] {confirmation['question']}")
+        if not pending and latest:
+            # The agent may have asked in its own words, and the person answered already.
+            question = last_agent_text(event.transcript_path)
+            if question and "?" in question:
+                if self.answer(creds, confirmation["id"], latest, question) == "approved":
+                    body["confirmation_id"] = confirmation["id"]
+                    try:
+                        result = request(creds["api_url"], "/v1/evaluate", body, creds["api_key"])
+                    except ApiError as exc:
+                        return self.unavailable(event, creds, exc)
+                    confirmation = result.get("confirmation")
+                    if result.get("decision") != "escalate" or not confirmation:
+                        return self.verdict(event, creds, result)
+        store[key] = {"id": confirmation["id"], "asked_after": latest}
+        self.state.save_confirmations(sid, store)
+        return a.deny(event, confirmation["agent_instruction"])
+
+    def prompt_answered(self, event: Event, creds: dict) -> None:
+        """The call ran after the assistant's permission prompt, so the person allowed it:
+        tell Aegis, and re-check the call as approved so its result is checked against it."""
+        store = self.state.confirmations(event.session_id)
+        asked = store.pop(f"use:{event.tool_use_id}", None)
+        if not asked:
+            return
+        self.state.save_confirmations(event.session_id, store)
+        if self.answer(creds, asked["id"], "approved", source="assistant_prompt") != "approved":
+            return
+        body = {**self.tool_body(event), "confirmation_id": asked["id"]}
+        try:
+            result = request(creds["api_url"], "/v1/evaluate", body, creds["api_key"])
+        except ApiError:
+            return
+        if result.get("audit_id"):
+            self.state.remember_audit(event.session_id, event.tool_use_id, result["audit_id"])
+
+    def answer(
+        self,
+        creds: dict,
+        confirmation_id: str,
+        message: str,
+        agent_question: str | None = None,
+        source: str = "conversation",
+    ) -> str:
+        body = {"message": message[:4000], "source": source}
+        if agent_question:
+            body["agent_question"] = agent_question[:4000]
+        try:
+            reply = request(
+                creds["api_url"],
+                f"/v1/confirmations/{confirmation_id}/reply",
+                body,
+                creds["api_key"],
+            )
+        except ApiError:
+            return "error"
+        return str(reply.get("status") or "pending")
+
     def decide(self, event: Event, creds: dict, path: str, body: dict) -> Output:
         try:
             result = request(creds["api_url"], path, body, creds["api_key"])
         except ApiError as exc:
             return self.unavailable(event, creds, exc)
+        return self.verdict(event, creds, result)
+
+    def verdict(self, event: Event, creds: dict, result: dict) -> Output:
         if event.kind == PRE_TOOL and result.get("audit_id") and event.tool_use_id:
             self.state.remember_audit(event.session_id, event.tool_use_id, result["audit_id"])
         verdict = result.get("decision")
