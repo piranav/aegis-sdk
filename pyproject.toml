@@ -33,3 +33,7 @@ line-length = 99
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "N", "W", "UP"]
+
+# The plugin runs on the system python3, which may predate 3.11 (no datetime.UTC).
+[tool.ruff.lint.per-file-ignores]
+"plugins/**" = ["UP017"]
