@@ -23,7 +23,7 @@ import json
 import os
 import time
 from dataclasses import dataclass, field
-from datetime import UTC, datetime
+from datetime import datetime, timezone
 from pathlib import Path
 
 MAX_READ_BYTES = 4 * 1024 * 1024
@@ -417,7 +417,7 @@ def tracked_since(creds: dict) -> str:
         try:
             moment = datetime.fromisoformat(tracked.replace("Z", "+00:00"))
             if moment.tzinfo is not None:
-                moment = moment.astimezone(UTC)
+                moment = moment.astimezone(timezone.utc)
             return moment.strftime("%Y-%m-%dT%H:%M:%S")
         except ValueError:
             pass
