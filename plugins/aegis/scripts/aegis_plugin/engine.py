@@ -7,6 +7,7 @@ import os
 import platform
 import re
 import socket
+import subprocess
 import time
 
 from aegis_plugin import VERSION
@@ -328,6 +329,11 @@ class Engine:
         commands = a.commands(event)
         if commands:
             facts["commands"] = commands
+            # Git rules check the branch a commit or push lands on, which a plain
+            # `git commit` doesn't name: report the checked-out one.
+            branch = current_branch(event.cwd) if any("git" in c for c in commands) else ""
+            if branch:
+                facts["branch"] = branch
         return {
             "agent_name": a.tool,
             "tool_name": event.tool_name or "unknown",
@@ -497,3 +503,17 @@ def explain(result: dict) -> str:
     if result.get("support_email"):
         text += f" ({result['support_email']})"
     return text
+
+
+def current_branch(cwd: str) -> str:
+    """The branch checked out in ``cwd``, or "" outside a repository or on a detached HEAD."""
+    try:
+        done = subprocess.run(
+            ["git", "-C", cwd or ".", "branch", "--show-current"],
+            capture_output=True,
+            text=True,
+            timeout=2,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return ""
+    return done.stdout.strip() if done.returncode == 0 else ""

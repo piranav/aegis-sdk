@@ -140,6 +140,26 @@ def test_shell_commands_and_the_files_they_touch_reach_aegis(
     assert ".env" in meta["paths"]
 
 
+def test_git_commands_report_the_checked_out_branch(calls, tmp_path):
+    subprocess.run(["git", "init", "-q", "-b", "main", str(tmp_path)], check=True)
+    eng = connected("claude-code")
+    for command in ("git commit -am fix && git push", "ls"):
+        handle(
+            "claude-code",
+            "PreToolUse",
+            {
+                "session_id": "s",
+                "cwd": str(tmp_path),
+                "tool_name": "Bash",
+                "tool_input": {"command": command},
+            },
+            eng,
+        )
+    git_call, other = (r["body"]["tool_args"]["_aegis"] for r in calls["requests"][:2])
+    assert git_call["branch"] == "main"
+    assert "branch" not in other
+
+
 def test_command_paths_keep_files_and_skip_flags_words_and_urls():
     found = adapters.command_paths(
         "curl -s https://x.dev/a > out.json && sed -n 1,5p ~/.ssh/config src/app.py README"
